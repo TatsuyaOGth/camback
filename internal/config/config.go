@@ -1,0 +1,252 @@
+// Package config loads and validates the camback TOML configuration.
+package config
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+
+	"github.com/pelletier/go-toml/v2"
+)
+
+// EnvConfig is the environment variable that overrides the default config location.
+const EnvConfig = "CAMBACK_CONFIG"
+
+// Verify modes.
+const (
+	VerifyHash = "hash"
+	VerifySize = "size"
+)
+
+// Config is the whole configuration file.
+type Config struct {
+	Remotes  map[string]Remote `toml:"remote"`
+	Defaults Defaults          `toml:"defaults"`
+	Cameras  []Camera          `toml:"camera"`
+}
+
+// Remote is an SFTP destination.
+type Remote struct {
+	Host         string `toml:"host"`
+	Port         int    `toml:"port"`
+	User         string `toml:"user"`
+	IdentityFile string `toml:"identity_file"`
+	// ShellPathMap maps SFTP path prefixes to the paths seen by the SSH shell
+	// (used when running sha256sum on the NAS).
+	ShellPathMap map[string]string `toml:"shell_path_map"`
+}
+
+// Defaults holds settings shared by every camera.
+type Defaults struct {
+	Verify          string   `toml:"verify"`
+	MediaExtensions []string `toml:"media_extensions"`
+	Exclude         []string `toml:"exclude"`
+}
+
+// Camera is one camera profile.
+type Camera struct {
+	ID          string  `toml:"id"`
+	Match       []Match `toml:"match"`
+	VolumeLabel string  `toml:"volume_label"`
+	Remote      string  `toml:"remote"`
+	Dest        string  `toml:"dest"`
+}
+
+// Match is an exact EXIF Make/Model pair.
+type Match struct {
+	Make  string `toml:"make"`
+	Model string `toml:"model"`
+}
+
+// DefaultPath returns the per-OS default config file location.
+func DefaultPath() (string, error) {
+	if runtime.GOOS == "windows" {
+		dir, err := os.UserConfigDir() // %AppData%
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, "camback", "config.toml"), nil
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "camback", "config.toml"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "camback", "config.toml"), nil
+}
+
+// ResolvePath picks the config path: flag > CAMBACK_CONFIG > default.
+func ResolvePath(flagValue string) (string, error) {
+	if flagValue != "" {
+		return ExpandHome(flagValue)
+	}
+	if env := os.Getenv(EnvConfig); env != "" {
+		return ExpandHome(env)
+	}
+	return DefaultPath()
+}
+
+// ExpandHome replaces a leading "~" with the current user's home directory.
+func ExpandHome(p string) (string, error) {
+	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, filepath.FromSlash(p[1:])), nil
+}
+
+// Load reads, decodes and validates the config file at p.
+func Load(p string) (*Config, error) {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
+	return cfg, nil
+}
+
+// Parse decodes and validates TOML data. Unknown keys are rejected so that
+// typos do not silently fall back to defaults.
+func Parse(data []byte) (*Config, error) {
+	var cfg Config
+	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		var sm *toml.StrictMissingError
+		if errors.As(err, &sm) {
+			return nil, fmt.Errorf("unknown config keys:\n%s", sm.String())
+		}
+		return nil, err
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.Defaults.Verify == "" {
+		c.Defaults.Verify = VerifyHash
+	}
+	for name, r := range c.Remotes {
+		if r.Port == 0 {
+			r.Port = 22
+		}
+		c.Remotes[name] = r
+	}
+	for i := range c.Cameras {
+		if d := c.Cameras[i].Dest; strings.HasPrefix(d, "/") {
+			c.Cameras[i].Dest = path.Clean(d)
+		}
+	}
+}
+
+// Validate checks cross references and value formats. All problems are
+// reported together.
+func (c *Config) Validate() error {
+	var errs []error
+	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+
+	switch c.Defaults.Verify {
+	case VerifyHash, VerifySize:
+	default:
+		add("defaults.verify: must be %q or %q, got %q", VerifyHash, VerifySize, c.Defaults.Verify)
+	}
+	for _, e := range c.Defaults.MediaExtensions {
+		if strings.TrimSpace(e) == "" {
+			add("defaults.media_extensions: empty extension")
+		}
+	}
+	for _, pat := range c.Defaults.Exclude {
+		if _, err := path.Match(pat, ""); err != nil {
+			add("defaults.exclude: bad pattern %q: %v", pat, err)
+		}
+	}
+
+	names := make([]string, 0, len(c.Remotes))
+	for name := range c.Remotes {
+		names = append(names, name)
+	}
+	sort.Strings(names) // map iteration order is random in Go; sort for stable messages
+	for _, name := range names {
+		r := c.Remotes[name]
+		if r.Host == "" {
+			add("remote.%s.host: required", name)
+		}
+		if r.User == "" {
+			add("remote.%s.user: required", name)
+		}
+		if r.Port < 1 || r.Port > 65535 {
+			add("remote.%s.port: out of range: %d", name, r.Port)
+		}
+		for k, v := range r.ShellPathMap {
+			if !strings.HasPrefix(k, "/") || !strings.HasPrefix(v, "/") {
+				add("remote.%s.shell_path_map: %q = %q: both sides must be absolute paths starting with /", name, k, v)
+			}
+		}
+	}
+
+	seen := map[string]bool{}
+	matchOwner := map[Match]string{} // trimmed make/model -> camera label
+	for i, cam := range c.Cameras {
+		label := fmt.Sprintf("camera[%d]", i)
+		if cam.ID != "" {
+			label = fmt.Sprintf("camera %q", cam.ID)
+		}
+		switch {
+		case cam.ID == "":
+			add("%s: id is required", label)
+		case seen[cam.ID]:
+			add("%s: duplicate id", label)
+		}
+		seen[cam.ID] = true
+		if len(cam.Match) == 0 && cam.VolumeLabel == "" {
+			add("%s: needs at least one match entry or volume_label", label)
+		}
+		for j, m := range cam.Match {
+			if strings.TrimSpace(m.Make) == "" || strings.TrimSpace(m.Model) == "" {
+				add("%s: match[%d]: make and model are both required", label, j)
+				continue
+			}
+			// The same Make/Model in two cameras would silently send every
+			// card to whichever camera comes first.
+			key := Match{Make: strings.TrimSpace(m.Make), Model: strings.TrimSpace(m.Model)}
+			if owner, ok := matchOwner[key]; ok && owner != label {
+				add("%s: match make = %q, model = %q is already used by %s", label, key.Make, key.Model, owner)
+			}
+			matchOwner[key] = label
+		}
+		if _, ok := c.Remotes[cam.Remote]; !ok {
+			add("%s: remote %q is not defined", label, cam.Remote)
+		}
+		if !strings.HasPrefix(cam.Dest, "/") {
+			add("%s: dest %q must be an absolute SFTP path starting with /", label, cam.Dest)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Camera returns the camera profile with the given id.
+func (c *Config) Camera(id string) (*Camera, bool) {
+	for i := range c.Cameras {
+		if c.Cameras[i].ID == id {
+			return &c.Cameras[i], true
+		}
+	}
+	return nil, false
+}
