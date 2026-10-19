@@ -1,2 +1,5 @@
 gitignore/*
 docs/
+dist/
+/camback
+/camback.exe

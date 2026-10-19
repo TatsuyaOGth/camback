@@ -1,0 +1,55 @@
+# camback configuration example.
+#
+# Default location:
+#   macOS / Linux : ~/.config/camback/config.toml  ($XDG_CONFIG_HOME is honoured)
+#   Windows       : %AppData%\camback\config.toml
+# Override with --config <path> or the CAMBACK_CONFIG environment variable
+# (handy for sharing one file between PCs through a synced folder).
+#
+# Unknown keys are an error, so typos are caught.
+
+[remote.nas]
+host = "nas.local"
+port = 22
+user = "me"
+# identity_file = "~/.ssh/id_ed25519"   # optional; ~ is the current user's home on every OS
+
+# Synology (and other chrooted SFTP servers) show shared folders at "/",
+# while the SSH shell sees "/volume1/...". camback runs sha256sum through the
+# shell to verify transfers, so it needs to translate paths. A probe file
+# checks this mapping at the start of every run; if it is wrong camback
+# falls back to downloading files to verify them.
+shell_path_map = { "/photo" = "/volume1/photo", "/home" = "/volume1/homes/me" }
+
+[defaults]
+verify = "hash"   # "hash" (sha256sum on the NAS, or read-back) or "size"
+# Extensions treated as photos/videos. A changed media file aborts the run;
+# any other changed file is saved under a timestamped name. Omit to use the
+# built-in list.
+# media_extensions = ["JPG", "DNG", "ARW", "RAF", "X3F", "MP4", "MOV"]
+# Extra exclusions (path.Match syntax). Without "/" a pattern matches any path
+# element, with "/" the whole card-relative path. Dotfiles and OS
+# housekeeping folders are always excluded.
+# exclude = ["*.THM"]
+
+# One entry per camera. Run `camback inspect <card>` to see the exact EXIF
+# Make/Model strings to put in "match".
+[[camera]]
+id = "GR3x"
+match = [{ make = "RICOH IMAGING COMPANY, LTD.", model = "RICOH GR IIIx" }]
+remote = "nas"
+dest = "/photo/GR3x"          # absolute SFTP path; the card's structure is mirrored below it
+
+[[camera]]
+id = "X-E4"
+match = [{ make = "FUJIFILM", model = "X-E4" }]
+remote = "nas"
+dest = "/photo/X-E4"
+
+# A device whose files carry no EXIF Make/Model can be recognised by its
+# volume label (or chosen with --camera when nothing else applies).
+[[camera]]
+id = "Insta360Go3"
+volume_label = "Insta360GO3"
+remote = "nas"
+dest = "/home/backups/Insta360Go3"
