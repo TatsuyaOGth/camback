@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TatsuyaOGth/camback/internal/applog"
 	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/meta"
 	"github.com/TatsuyaOGth/camback/internal/testutil"
@@ -106,10 +107,12 @@ func TestRunEndToEnd(t *testing.T) {
 	if _, ok := e.nas.Get("/photo/GR3x/DCIM/100RICOH/R0001.DNG"); !ok {
 		t.Errorf("DNG not transferred: %v", e.nas.Paths())
 	}
-	logs, _ := filepath.Glob(filepath.Join(os.Getenv("HOME"), "*", "*", "camback", "*.jsonl"))
-	logs2, _ := filepath.Glob(filepath.Join(os.Getenv("HOME"), "camback", "*.jsonl"))
-	if len(logs)+len(logs2) != 1 {
-		t.Errorf("expected one log file, got %v %v", logs, logs2)
+	logDir, err := applog.Dir() // per-OS location, inside the test's temporary home
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logs, _ := filepath.Glob(filepath.Join(logDir, "*.jsonl")); len(logs) != 1 {
+		t.Errorf("expected one log file in %s, got %v", logDir, logs)
 	}
 
 	code, out = e.run("--yes")

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,8 +35,13 @@ func WriteJPEG(t *testing.T, p, make_, model string) {
 	if make_ == "" {
 		return
 	}
-	out, err := exec.Command("exiftool", "-q", "-overwrite_original",
-		"-Make="+make_, "-Model="+model, p).CombinedOutput()
+	// Pass the file name on stdin as UTF-8, like meta.Read does: on Windows,
+	// exiftool receives command-line arguments in the ANSI code page, so
+	// non-ASCII names would turn into "?" (read as a wildcard).
+	cmd := exec.Command("exiftool", "-q", "-overwrite_original", "-charset", "filename=utf8",
+		"-Make="+make_, "-Model="+model, "-@", "-")
+	cmd.Stdin = strings.NewReader(p + "\n")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("exiftool write: %v: %s", err, out)
 	}
