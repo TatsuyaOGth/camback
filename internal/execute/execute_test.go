@@ -312,3 +312,25 @@ func TestParallelFailureCancelsOthers(t *testing.T) {
 		t.Errorf("progress: started %d, ended %d, ok %d, done %v", prog.started, prog.ended, prog.okay, prog.done)
 	}
 }
+
+// A card file named like the timestamped name of another, changed file
+// would share its destination (and temporary file) with it.
+func TestDuplicateDestinationRefused(t *testing.T) {
+	files := setup(t, map[string]string{
+		"MISC/STATE.XML":                  "new state",
+		"MISC/STATE_20261016-002627Z.XML": "copied back to the card",
+	})
+	nas := fake.New()
+	nas.Put("/photo/GR3x/MISC/STATE.XML", []byte("old"), mtime.Add(-time.Hour))
+	p := mustPlan(t, nas, files)
+	if n, _ := p.Count(plan.Rename); n != 1 {
+		t.Fatalf("plan: %d RENAME, want 1", n)
+	}
+	_, err := Run(context.Background(), nas, p, Options{Verify: config.VerifySize, Jobs: 4})
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "would both be saved as") {
+		t.Fatalf("err = %v, want a duplicate destination conflict", err)
+	}
+	if paths := nas.Paths(); len(paths) != 1 {
+		t.Errorf("nothing should be written: %v", paths)
+	}
+}

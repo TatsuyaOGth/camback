@@ -72,6 +72,7 @@ func TestParseErrors(t *testing.T) {
 		{"bad verify", `[remote.nas]`, "[defaults]\nverify = \"md5\"\n[remote.nas]", "defaults.verify"},
 		{"too many jobs", `[remote.nas]`, "[defaults]\njobs = 9\n[remote.nas]", "defaults.jobs: must be between 1 and 8"},
 		{"negative jobs", `[remote.nas]`, "[defaults]\njobs = -1\n[remote.nas]", "defaults.jobs"},
+		{"zero jobs", `[remote.nas]`, "[defaults]\njobs = 0\n[remote.nas]", "defaults.jobs: must be between 1 and 8, got 0"},
 		{"relative dest", `dest = "/photo/GR3x/"`, `dest = "photo/GR3x"`, "absolute SFTP path"},
 		{"undefined remote", `remote = "nas"`, `remote = "nas2"`, `remote "nas2" is not defined`},
 		{"duplicate id", `id = "Go3"`, `id = "GR3x"`, "duplicate id"},

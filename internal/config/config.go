@@ -131,7 +131,9 @@ func Load(p string) (*Config, error) {
 // Parse decodes and validates TOML data. Unknown keys are rejected so that
 // typos do not silently fall back to defaults.
 func Parse(data []byte) (*Config, error) {
-	var cfg Config
+	// Defaults that 0 or "" cannot stand for are set before decoding, so an
+	// explicit 0 still fails validation.
+	cfg := Config{Defaults: Defaults{Jobs: DefaultJobs}}
 	dec := toml.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
@@ -151,9 +153,6 @@ func Parse(data []byte) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Defaults.Verify == "" {
 		c.Defaults.Verify = VerifyHash
-	}
-	if c.Defaults.Jobs == 0 {
-		c.Defaults.Jobs = DefaultJobs
 	}
 	for name, r := range c.Remotes {
 		if r.Port == 0 {

@@ -123,7 +123,7 @@ func TestRunEndToEnd(t *testing.T) {
 
 func TestRunJobs(t *testing.T) {
 	e := newEnv(t)
-	for _, bad := range []string{"9", "-1"} {
+	for _, bad := range []string{"9", "-1", "0"} {
 		if code, out := e.run("--yes", "--jobs", bad); code != ExitFailure || !strings.Contains(out, "--jobs must be between 1 and 8") {
 			t.Errorf("--jobs %s: code %d\n%s", bad, code, out)
 		}

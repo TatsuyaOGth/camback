@@ -65,7 +65,8 @@ type Result struct {
 // Run transfers every NEW and RENAME item of p, up to opt.Jobs files at a
 // time, starting them in plan order. At the first error it starts no more
 // files and cancels the ones in progress, whose temporary files are
-// removed; files already moved into place are complete and verified.
+// removed; one already verified by then is still moved into place. Files
+// moved into place are complete and verified.
 func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) (*Result, error) {
 	if opt.Logger == nil {
 		opt.Logger = slog.New(slog.DiscardHandler)
@@ -83,6 +84,16 @@ func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) 
 	res := &Result{VerifyMethod: "size"}
 	if len(items) == 0 {
 		return res, nil
+	}
+	// Two files never share a destination: parallel transfers would share
+	// its temporary file. (A file on the card can carry the timestamped
+	// name another one is renamed to.)
+	seen := map[transport.Path]string{}
+	for _, it := range items {
+		if other, ok := seen[it.Dest]; ok {
+			return res, fmt.Errorf("%w: %s and %s would both be saved as %s", ErrConflict, other, it.File.Rel, it.Dest)
+		}
+		seen[it.Dest] = it.File.Rel
 	}
 
 	r := &runner{t: t, opt: opt}
