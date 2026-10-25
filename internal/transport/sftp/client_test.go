@@ -333,3 +333,68 @@ func TestDialWarnsOnce(t *testing.T) {
 		t.Errorf("warnings = %q", p.warnings)
 	}
 }
+
+// The accepted key must go on a line of its own and be remembered, even when
+// the last line has no newline (a skipped line or a valid one).
+func TestHostKeyAppendAfterUnterminatedLine(t *testing.T) {
+	addr := "nas.local:2222"
+	remote := &net.TCPAddr{IP: net.IPv4(192, 168, 1, 10), Port: 2222}
+	for name, last := range map[string]string{
+		"skipped": "bad.example ssh-ed25519 !!!not-base64",
+		"valid":   knownhosts.Line([]string{"other.example"}, newKey(t)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			kh := filepath.Join(t.TempDir(), "known_hosts")
+			os.WriteFile(kh, []byte(last), 0o600)
+			key := newKey(t)
+			cb, _, err := newHostKeyCallback(kh, addr, &fakePrompter{confirm: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cb(addr, remote, key); err != nil {
+				t.Fatal(err)
+			}
+			if data, _ := os.ReadFile(kh); !strings.HasPrefix(string(data), last+"\n[nas.local]:2222 ") {
+				t.Errorf("known_hosts = %q", data)
+			}
+
+			p := &fakePrompter{}
+			cb2, _, err := newHostKeyCallback(kh, addr, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cb2(addr, remote, key); err != nil {
+				t.Errorf("accepted key not remembered: %v", err)
+			}
+			if err := cb2(addr, remote, newKey(t)); err == nil || !strings.Contains(err.Error(), "MISMATCH") {
+				t.Errorf("changed key: err = %v", err)
+			}
+			if p.confirms != 0 {
+				t.Errorf("should not prompt after reload")
+			}
+		})
+	}
+}
+
+// A line the knownhosts scanner can still read is kept, however long.
+func TestHostKeyKeepsLongReadableLine(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	addr := "nas.local:2222"
+	remote := &net.TCPAddr{IP: net.IPv4(192, 168, 1, 10), Port: 2222}
+	key := newKey(t)
+	line := knownhosts.Line([]string{"[nas.local]:2222"}, key) + " "
+	line += strings.Repeat("c", maxKnownHostsLine-len(line)) // long trailing comment
+	os.WriteFile(kh, []byte(line+"\n"), 0o600)
+
+	p := &fakePrompter{}
+	cb, _, err := newHostKeyCallback(kh, addr, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.warnings) != 0 {
+		t.Errorf("warnings = %q", p.warnings)
+	}
+	if err := cb(addr, remote, newKey(t)); err == nil || !strings.Contains(err.Error(), "MISMATCH") {
+		t.Errorf("changed key: err = %v", err)
+	}
+}

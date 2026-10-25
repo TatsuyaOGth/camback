@@ -286,15 +286,31 @@ func newHostKeyCallback(khPath, addr string, p Prompter) (ssh.HostKeyCallback, [
 		if !ok {
 			return errors.New("host key not trusted")
 		}
-		f, err := os.OpenFile(khPath, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = fmt.Fprintln(f, knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
-		return err
+		return appendKnownHost(khPath, knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
 	}
 	return cb, knownAlgorithms(base, addr), nil
+}
+
+// appendKnownHost adds line to known_hosts on a line of its own, even when
+// the file does not end with a newline; otherwise the new key would join the
+// last line and be lost (or skipped) on the next load.
+func appendKnownHost(khPath, line string) error {
+	data, err := os.ReadFile(khPath)
+	if err != nil {
+		return err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		line = "\n" + line
+	}
+	f, err := os.OpenFile(khPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(f, line)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // skippedLine is a known_hosts line that loadKnownHosts could not parse.
@@ -303,9 +319,9 @@ type skippedLine struct {
 	reason string
 }
 
-// maxKnownHostsLine is far longer than any key line, and short enough for the
-// line scanner in knownhosts (which fails the whole file on a longer line).
-const maxKnownHostsLine = bufio.MaxScanTokenSize / 2
+// maxKnownHostsLine is the longest line (without its newline) the line
+// scanner in knownhosts can read; a longer line fails the whole file.
+const maxKnownHostsLine = bufio.MaxScanTokenSize - 1
 
 // loadKnownHosts is knownhosts.New, except that a line it cannot parse (a key
 // type x/crypto does not support, a line written by another tool) is skipped
@@ -335,7 +351,7 @@ func loadKnownHosts(khPath string) (ssh.HostKeyCallback, []skippedLine, error) {
 		return nil
 	}
 	for i, l := range lines {
-		if len(l) > maxKnownHostsLine {
+		if len(strings.TrimSuffix(l, "\n")) > maxKnownHostsLine {
 			if err := blank(i, "line too long"); err != nil {
 				return nil, nil, err
 			}
