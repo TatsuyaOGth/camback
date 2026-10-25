@@ -38,3 +38,15 @@ jobs:
         with:
           go-version-file: go.mod
       - run: ./scripts/build.sh
+
+  # Runs camback against a real OpenSSH server in Docker (e2e/sshd).
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install exiftool
+        run: sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl
+      - run: go test -tags e2e ./e2e/...

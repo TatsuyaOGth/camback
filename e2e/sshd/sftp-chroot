@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs sftp-server as nas, chrooted to /volume1. Called through sudo by the
+# sftp subsystem; takes no arguments, so sudo cannot be used for anything else.
+exec /usr/sbin/chroot --userspec=nas:nas /volume1 /usr/lib/openssh/sftp-server
