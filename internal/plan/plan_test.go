@@ -14,7 +14,7 @@ import (
 	"github.com/TatsuyaOGth/camback/internal/transport/fake"
 )
 
-var base = time.Date(2026, 10, 16, 9, 26, 27, 0, time.Local)
+var base = time.Date(2026, 10, 16, 9, 26, 27, 0, time.FixedZone("JST", 9*60*60))
 
 // card writes files to a temp "SD card" and returns them as source.Files.
 func card(t *testing.T, files map[string]string, mtime time.Time) []source.File {
@@ -64,6 +64,8 @@ func TestBuild(t *testing.T) {
 		"MISC/NEW.XML":       "x",
 		"MISC/SAVED.XML":     "v3",
 		"MISC/CLASH.XML":     "v4",
+		"MISC/OLDNAME.XML":   "v5",
+		"MISC/OLDDIFF.XML":   "v6",
 	}, base)
 
 	nas := fake.New()
@@ -75,10 +77,16 @@ func TestBuild(t *testing.T) {
 	nas.Put("/photo/GR3x/MISC/MEDIAPRO.XML", []byte("v1"), base.Add(-time.Hour))
 	// Earlier run already saved this version under the renamed name.
 	nas.Put("/photo/GR3x/MISC/SAVED.XML", []byte("old"), base.Add(-time.Hour))
-	nas.Put("/photo/GR3x/MISC/SAVED_20261016-092627.XML", []byte("v3"), base)
+	nas.Put("/photo/GR3x/MISC/SAVED_20261016-002627Z.XML", []byte("v3"), base)
 	// Renamed target exists with different content.
 	nas.Put("/photo/GR3x/MISC/CLASH.XML", []byte("old"), base.Add(-time.Hour))
-	nas.Put("/photo/GR3x/MISC/CLASH_20261016-092627.XML", []byte("zz"), base.Add(time.Hour))
+	nas.Put("/photo/GR3x/MISC/CLASH_20261016-002627Z.XML", []byte("zz"), base.Add(time.Hour))
+	// An older version saved this one under its local-time name.
+	nas.Put("/photo/GR3x/MISC/OLDNAME.XML", []byte("old"), base.Add(-time.Hour))
+	nas.Put(transport.Path("/photo/GR3x/MISC/"+localRenamedName("OLDNAME.XML", base)), []byte("v5"), base)
+	// A local-time name with other content is no reason to stop.
+	nas.Put("/photo/GR3x/MISC/OLDDIFF.XML", []byte("old"), base.Add(-time.Hour))
+	nas.Put(transport.Path("/photo/GR3x/MISC/"+localRenamedName("OLDDIFF.XML", base)), []byte("zz"), base.Add(time.Hour))
 
 	p := build(t, nas, files)
 	want := map[string]Action{
@@ -92,6 +100,8 @@ func TestBuild(t *testing.T) {
 		"MISC/NEW.XML":       New,
 		"MISC/SAVED.XML":     Same,
 		"MISC/CLASH.XML":     Conflict,
+		"MISC/OLDNAME.XML":   Same,
+		"MISC/OLDDIFF.XML":   Rename,
 	}
 	got := actions(p)
 	for rel, a := range want {
@@ -99,18 +109,24 @@ func TestBuild(t *testing.T) {
 			t.Errorf("%s: got %s, want %s", rel, got[rel], a)
 		}
 	}
+	wantDest := map[string]transport.Path{
+		"MISC/MEDIAPRO.XML": "/photo/GR3x/MISC/MEDIAPRO_20261016-002627Z.XML",
+		"MISC/OLDNAME.XML":  transport.Path("/photo/GR3x/MISC/" + localRenamedName("OLDNAME.XML", base)),
+		"MISC/OLDDIFF.XML":  "/photo/GR3x/MISC/OLDDIFF_20261016-002627Z.XML",
+	}
 	for _, it := range p.Items {
-		if it.File.Rel == "MISC/MEDIAPRO.XML" && it.Dest != "/photo/GR3x/MISC/MEDIAPRO_20261016-092627.XML" {
-			t.Errorf("rename dest = %s", it.Dest)
+		if d, ok := wantDest[it.File.Rel]; ok && it.Dest != d {
+			t.Errorf("%s: dest = %s, want %s", it.File.Rel, it.Dest, d)
 		}
 	}
 	if n, bytes := p.Count(New); n != 2 || bytes != 4 {
 		t.Errorf("New count = %d, %d bytes", n, bytes)
 	}
 	// Stage 3 (read-back hash) only runs when size matches but mtime does
-	// not: SHIFT, DIFF, MEDIAPRO, and CLASH's renamed target.
-	if nas.OpenCalls != 4 {
-		t.Errorf("read-backs = %d, want 4", nas.OpenCalls)
+	// not: SHIFT, DIFF, MEDIAPRO, CLASH's renamed target, and OLDDIFF's
+	// local-time name.
+	if nas.OpenCalls != 5 {
+		t.Errorf("read-backs = %d, want 5", nas.OpenCalls)
 	}
 }
 
@@ -125,14 +141,40 @@ func TestBuildDirectoryAtTarget(t *testing.T) {
 
 func TestRenamedName(t *testing.T) {
 	cases := map[string]string{
-		"MEDIAPRO.XML": "MEDIAPRO_20261016-092627.XML",
-		"a.tar.gz":     "a.tar_20261016-092627.gz",
-		"README":       "README_20261016-092627",
+		"MEDIAPRO.XML": "MEDIAPRO_20261016-002627Z.XML",
+		"a.tar.gz":     "a.tar_20261016-002627Z.gz",
+		"README":       "README_20261016-002627Z",
 	}
 	for in, want := range cases {
 		if got := RenamedName(in, base); got != want {
 			t.Errorf("RenamedName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The name must not depend on the time zone of the PC (issue #2).
+func TestRenamedNameIgnoresLocalTimeZone(t *testing.T) {
+	saved := time.Local
+	t.Cleanup(func() { time.Local = saved })
+	var names []string
+	for _, tz := range []*time.Location{time.FixedZone("JST", 9*60*60), time.UTC, time.FixedZone("EST", -5*60*60)} {
+		time.Local = tz
+		names = append(names, RenamedName("MEDIAPRO.XML", base))
+	}
+	for _, n := range names[1:] {
+		if n != names[0] {
+			t.Errorf("names differ by time zone: %q", names)
+			break
+		}
+	}
+}
+
+func TestLocalRenamedName(t *testing.T) {
+	saved := time.Local
+	t.Cleanup(func() { time.Local = saved })
+	time.Local = time.FixedZone("JST", 9*60*60)
+	if got := localRenamedName("MEDIAPRO.XML", base.UTC()); got != "MEDIAPRO_20261016-092627.XML" {
+		t.Errorf("localRenamedName = %q", got)
 	}
 }
 
