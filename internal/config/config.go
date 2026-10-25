@@ -24,6 +24,14 @@ const (
 	VerifySize = "size"
 )
 
+// Parallel transfers.
+const (
+	DefaultJobs = 4
+	// MaxJobs keeps the SSH sessions camback opens (one for SFTP, one per
+	// sha256sum in progress) below OpenSSH's default MaxSessions of 10.
+	MaxJobs = 8
+)
+
 // Config is the whole configuration file.
 type Config struct {
 	Remotes  map[string]Remote `toml:"remote"`
@@ -45,6 +53,7 @@ type Remote struct {
 // Defaults holds settings shared by every camera.
 type Defaults struct {
 	Verify          string   `toml:"verify"`
+	Jobs            int      `toml:"jobs"` // files transferred at the same time
 	MediaExtensions []string `toml:"media_extensions"`
 	Exclude         []string `toml:"exclude"`
 }
@@ -143,6 +152,9 @@ func (c *Config) applyDefaults() {
 	if c.Defaults.Verify == "" {
 		c.Defaults.Verify = VerifyHash
 	}
+	if c.Defaults.Jobs == 0 {
+		c.Defaults.Jobs = DefaultJobs
+	}
 	for name, r := range c.Remotes {
 		if r.Port == 0 {
 			r.Port = 22
@@ -166,6 +178,9 @@ func (c *Config) Validate() error {
 	case VerifyHash, VerifySize:
 	default:
 		add("defaults.verify: must be %q or %q, got %q", VerifyHash, VerifySize, c.Defaults.Verify)
+	}
+	if j := c.Defaults.Jobs; j < 1 || j > MaxJobs {
+		add("defaults.jobs: must be between 1 and %d, got %d", MaxJobs, j)
 	}
 	for _, e := range c.Defaults.MediaExtensions {
 		if strings.TrimSpace(e) == "" {

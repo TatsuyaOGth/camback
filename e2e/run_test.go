@@ -268,6 +268,27 @@ func TestVerifyMethods(t *testing.T) {
 	}
 }
 
+// The most parallel transfers allowed: each verifies with sha256sum in its
+// own SSH session next to the SFTP one, which must stay within OpenSSH's
+// MaxSessions.
+func TestParallelTransfer(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	for i := range 40 {
+		e.writeCard(fmt.Sprintf("DCIM/100RICOH/R%04d.DNG", i+2), strings.Repeat(fmt.Sprint(i), 50000), base)
+	}
+	code, out := e.run("--yes", "--jobs", "8")
+	if code != 0 || !strings.Contains(out, "Done: 41 files") || !strings.Contains(out, "verified by sha256sum on destination") {
+		t.Fatalf("code %d", code)
+	}
+	for i := range 40 {
+		rel := fmt.Sprintf("DCIM/100RICOH/R%04d.DNG", i+2)
+		if got := e.readNAS(rel); got != strings.Repeat(fmt.Sprint(i), 50000) {
+			t.Errorf("%s: content differs", rel)
+		}
+	}
+	e.noLeftovers()
+}
+
 // camback never overwrites: it checks the target before renaming, and
 // OpenSSH's sftp-server refuses a rename onto an existing file as well, so
 // a file created in between is not overwritten either. The in-process test

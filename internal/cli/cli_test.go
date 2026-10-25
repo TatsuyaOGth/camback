@@ -121,6 +121,21 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
+func TestRunJobs(t *testing.T) {
+	e := newEnv(t)
+	for _, bad := range []string{"9", "-1"} {
+		if code, out := e.run("--yes", "--jobs", bad); code != ExitFailure || !strings.Contains(out, "--jobs must be between 1 and 8") {
+			t.Errorf("--jobs %s: code %d\n%s", bad, code, out)
+		}
+	}
+	if len(e.nas.Paths()) != 0 {
+		t.Fatalf("rejected runs wrote files: %v", e.nas.Paths())
+	}
+	if code, out := e.run("--yes", "-j", "1"); code != ExitOK || !strings.Contains(out, "Done: 2 files") {
+		t.Fatalf("-j 1: code %d\n%s", code, out)
+	}
+}
+
 func TestRunConflict(t *testing.T) {
 	e := newEnv(t)
 	e.nas.Put("/photo/GR3x/DCIM/100RICOH/R0001.DNG", []byte("a different photo"), time.Now())

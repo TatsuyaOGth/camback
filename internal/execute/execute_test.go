@@ -3,10 +3,13 @@ package execute
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/TatsuyaOGth/camback/internal/media"
 	"github.com/TatsuyaOGth/camback/internal/plan"
 	"github.com/TatsuyaOGth/camback/internal/source"
+	"github.com/TatsuyaOGth/camback/internal/transport"
 	"github.com/TatsuyaOGth/camback/internal/transport/fake"
 )
 
@@ -164,11 +168,29 @@ func TestCancel(t *testing.T) {
 	}
 }
 
-type recProgress struct{ done []bool }
+type recProgress struct {
+	mu          sync.Mutex
+	started     int
+	ended, okay int
+	done        []bool
+}
 
-func (r *recProgress) Start(int, int64)              {}
-func (r *recProgress) File(int, plan.Item) io.Writer { return io.Discard }
-func (r *recProgress) Done(ok bool)                  { r.done = append(r.done, ok) }
+func (r *recProgress) Start(int, int64) {}
+func (r *recProgress) File(int, plan.Item) io.Writer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.started++
+	return io.Discard
+}
+func (r *recProgress) FileDone(_ int, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ended++
+	if ok {
+		r.okay++
+	}
+}
+func (r *recProgress) Done(ok bool) { r.done = append(r.done, ok) }
 
 func TestProgressDoneReportsOutcome(t *testing.T) {
 	files := setup(t, map[string]string{"DCIM/A.JPG": "aaaa"})
@@ -188,5 +210,105 @@ func TestProgressDoneReportsOutcome(t *testing.T) {
 	}
 	if len(bad.done) != 1 || bad.done[0] {
 		t.Errorf("failure: Done calls = %v, want [false]", bad.done)
+	}
+}
+
+// slowFS delays Create so that transfers overlap, records the most Creates
+// in progress at once, and can fail the Create of one temporary file.
+type slowFS struct {
+	*fake.FS
+	delay          time.Duration
+	failOn         transport.Path
+	inflight, peak atomic.Int32
+	mu             sync.Mutex
+	created        []transport.Path
+}
+
+func (s *slowFS) Create(p transport.Path) (io.WriteCloser, error) {
+	n := s.inflight.Add(1)
+	defer s.inflight.Add(-1)
+	for old := s.peak.Load(); n > old && !s.peak.CompareAndSwap(old, n); old = s.peak.Load() {
+	}
+	s.mu.Lock()
+	s.created = append(s.created, p)
+	s.mu.Unlock()
+	if p == s.failOn {
+		return nil, errors.New("disk full")
+	}
+	time.Sleep(s.delay)
+	return s.FS.Create(p)
+}
+
+func manyFiles(t *testing.T, n int) []source.File {
+	t.Helper()
+	m := map[string]string{}
+	for i := range n {
+		m[fmt.Sprintf("DCIM/%d/F%02d.JPG", i%3, i)] = fmt.Sprintf("content %d", i)
+	}
+	return setup(t, m)
+}
+
+func TestParallelRespectsJobs(t *testing.T) {
+	for _, jobs := range []int{1, 4} {
+		t.Run(fmt.Sprint(jobs), func(t *testing.T) {
+			files := manyFiles(t, 12)
+			nas := &slowFS{FS: fake.New(), delay: 20 * time.Millisecond}
+			nas.HashSupported = true
+			prog := &recProgress{}
+			res, err := Run(context.Background(), nas, mustPlan(t, nas.FS, files), Options{
+				Verify: config.VerifyHash, Jobs: jobs, Progress: prog,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Files != 12 {
+				t.Errorf("result = %+v", res)
+			}
+			if got := nas.peak.Load(); got != int32(jobs) {
+				t.Errorf("peak concurrent transfers = %d, want %d", got, jobs)
+			}
+			for _, f := range files {
+				want, _ := os.ReadFile(f.Abs)
+				if got, _ := nas.Get(transport.Path("/photo/GR3x/" + f.Rel)); string(got) != string(want) {
+					t.Errorf("%s = %q, want %q", f.Rel, got, want)
+				}
+			}
+			for _, p := range nas.Paths() {
+				if strings.Contains(string(p), TempSuffix) || strings.Contains(string(p), "camback-probe") {
+					t.Errorf("leftover %s", p)
+				}
+			}
+			if prog.started != 12 || prog.ended != 12 || prog.okay != 12 || len(prog.done) != 1 || !prog.done[0] {
+				t.Errorf("progress: started %d, ended %d, ok %d, done %v", prog.started, prog.ended, prog.okay, prog.done)
+			}
+		})
+	}
+}
+
+// A failure stops the run: no further file starts, the files in progress
+// are cancelled and their temporary files removed, and the error names the
+// file that failed (not a cancelled one).
+func TestParallelFailureCancelsOthers(t *testing.T) {
+	files := manyFiles(t, 20)
+	p := mustPlan(t, fake.New(), files)
+	items := p.Filter(plan.New)
+	bad := items[1]
+	nas := &slowFS{FS: fake.New(), delay: 50 * time.Millisecond, failOn: tempPath(bad.Dest)}
+	prog := &recProgress{}
+	_, err := Run(context.Background(), nas, p, Options{Verify: config.VerifySize, Jobs: 4, Progress: prog})
+	if err == nil || !strings.Contains(err.Error(), bad.File.Rel) || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("err = %v, want the failure of %s", err, bad.File.Rel)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the original failure, not a cancellation", err)
+	}
+	if paths := nas.Paths(); len(paths) != 0 {
+		t.Errorf("files left on the destination: %v", paths)
+	}
+	if len(nas.created) > 4 {
+		t.Errorf("%d files were started after the failure: %v", len(nas.created)-4, nas.created[4:])
+	}
+	if prog.started != prog.ended || prog.okay != 0 || len(prog.done) != 1 || prog.done[0] {
+		t.Errorf("progress: started %d, ended %d, ok %d, done %v", prog.started, prog.ended, prog.okay, prog.done)
 	}
 }

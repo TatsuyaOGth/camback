@@ -13,6 +13,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/hashing"
@@ -27,11 +30,18 @@ const TempSuffix = ".camback-part"
 var ErrConflict = errors.New("destination file appeared during transfer")
 
 // Progress receives transfer progress. Implementations live in the CLI.
+//
+// With Options.Jobs > 1, File and FileDone are called from several
+// goroutines at once, and the writers File returns are written to
+// concurrently.
 type Progress interface {
 	Start(files int, bytes int64)
-	// File is called before each file; the returned writer receives every
+	// File is called when a file starts; the returned writer receives every
 	// byte read from the card.
 	File(index int, it plan.Item) io.Writer
+	// FileDone is called when a file ends; ok is false if it failed or was
+	// cancelled.
+	FileDone(index int, ok bool)
 	// Done is called once at the end; ok is false when the run stopped early.
 	Done(ok bool)
 }
@@ -39,6 +49,7 @@ type Progress interface {
 // Options configures Run.
 type Options struct {
 	Verify   string // config.VerifyHash or config.VerifySize
+	Jobs     int    // files transferred at the same time; less than 1 means 1
 	Logger   *slog.Logger
 	Progress Progress
 	Warn     func(msg string)
@@ -51,8 +62,10 @@ type Result struct {
 	VerifyMethod string // "sha256sum on destination", "read-back", "size"
 }
 
-// Run transfers every NEW and RENAME item of p, in order. It stops at the
-// first error; files already moved into place are complete and verified.
+// Run transfers every NEW and RENAME item of p, up to opt.Jobs files at a
+// time, starting them in plan order. At the first error it starts no more
+// files and cancels the ones in progress, whose temporary files are
+// removed; files already moved into place are complete and verified.
 func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) (*Result, error) {
 	if opt.Logger == nil {
 		opt.Logger = slog.New(slog.DiscardHandler)
@@ -80,26 +93,63 @@ func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) 
 		r.remoteHash, res.VerifyMethod = r.chooseRemoteHash(ctx, p.Dest)
 	}
 
+	// Create the directories first: parallel transfers do not race to
+	// create the same one, and each file needs one round trip less.
+	made := map[transport.Path]bool{}
+	for _, it := range items {
+		if d := it.Dest.Dir(); !made[d] {
+			made[d] = true
+			if err := ctx.Err(); err != nil {
+				return res, err
+			}
+			if err := t.MkdirAll(d); err != nil {
+				return res, fmt.Errorf("mkdir %s: %w", d, err)
+			}
+		}
+	}
+
 	var total int64
 	for _, it := range items {
 		total += it.File.Size
 	}
 	opt.Progress.Start(len(items), total)
+
+	var mu sync.Mutex // guards res
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(max(opt.Jobs, 1))
+	stopped := false
 	for i, it := range items {
-		if err := ctx.Err(); err != nil {
-			opt.Progress.Done(false)
-			return res, err
+		if gctx.Err() != nil { // a transfer failed, or the run was interrupted
+			stopped = true
+			break
 		}
-		if err := r.transfer(ctx, i, it); err != nil {
-			opt.Progress.Done(false)
-			opt.Logger.Error("transfer failed", "file", it.File.Rel, "dest", it.Dest.String(), "error", err.Error())
-			return res, fmt.Errorf("%s: %w", it.File.Rel, err)
-		}
-		res.Files++
-		res.Bytes += it.File.Size
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err // stopped while this file waited for a free slot
+			}
+			err := r.transfer(gctx, it, opt.Progress.File(i, it))
+			opt.Progress.FileDone(i, err == nil)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					opt.Logger.Warn("transfer cancelled", "file", it.File.Rel, "dest", it.Dest.String())
+				} else {
+					opt.Logger.Error("transfer failed", "file", it.File.Rel, "dest", it.Dest.String(), "error", err.Error())
+				}
+				return fmt.Errorf("%s: %w", it.File.Rel, err)
+			}
+			mu.Lock()
+			res.Files++
+			res.Bytes += it.File.Size
+			mu.Unlock()
+			return nil
+		})
 	}
-	opt.Progress.Done(true)
-	return res, nil
+	err := g.Wait() // the first error; the others were caused by cancelling
+	if err == nil && stopped {
+		err = ctx.Err() // interrupted between files
+	}
+	opt.Progress.Done(err == nil)
+	return res, err
 }
 
 type runner struct {
@@ -150,11 +200,9 @@ func tempPath(dest transport.Path) transport.Path {
 	return dest.Dir().Join("." + dest.Base() + TempSuffix)
 }
 
-func (r *runner) transfer(ctx context.Context, i int, it plan.Item) (err error) {
+// transfer copies one file; progress receives every byte read from the card.
+func (r *runner) transfer(ctx context.Context, it plan.Item, progress io.Writer) (err error) {
 	tmp := tempPath(it.Dest)
-	if err := r.t.MkdirAll(it.Dest.Dir()); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
 	defer func() {
 		if err != nil {
 			r.t.Remove(tmp) // best effort; a leftover .camback-part is overwritten next time
@@ -174,7 +222,7 @@ func (r *runner) transfer(ctx context.Context, i int, it plan.Item) (err error) 
 	// Read the card once: the same bytes go to the NAS, the hash and the
 	// progress bar.
 	h := sha256.New()
-	reader := io.TeeReader(&hashing.ContextReader{Ctx: ctx, R: src}, io.MultiWriter(h, r.opt.Progress.File(i, it)))
+	reader := io.TeeReader(&hashing.ContextReader{Ctx: ctx, R: src}, io.MultiWriter(h, progress))
 	n, err := io.Copy(w, reader)
 	if cerr := w.Close(); err == nil {
 		err = cerr
@@ -231,4 +279,5 @@ type nopProgress struct{}
 
 func (nopProgress) Start(int, int64)              {}
 func (nopProgress) File(int, plan.Item) io.Writer { return io.Discard }
+func (nopProgress) FileDone(int, bool)            {}
 func (nopProgress) Done(bool)                     {}

@@ -23,6 +23,7 @@ shell_path_map = { "/photo" = "/volume1/photo", "/home" = "/volume1/homes/me" }
 
 [defaults]
 verify = "hash"   # "hash" (sha256sum on the NAS, or read-back) or "size"
+jobs = 4          # files transferred at the same time, 1-8 (--jobs overrides)
 # Extensions treated as photos/videos. A changed media file aborts the run;
 # any other changed file is saved under a timestamped name. Omit to use the
 # built-in list.
