@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -19,6 +20,7 @@ import (
 
 	psftp "github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/TatsuyaOGth/camback/internal/transport"
 )
@@ -179,12 +181,14 @@ func TestShellQuote(t *testing.T) {
 type fakePrompter struct {
 	confirm  bool
 	confirms int
+	warnings []string
 }
 
 func (f *fakePrompter) Password(string) (string, error) {
 	return "", errors.New("no password in tests")
 }
 func (f *fakePrompter) Confirm(string) (bool, error) { f.confirms++; return f.confirm, nil }
+func (f *fakePrompter) Warn(msg string)              { f.warnings = append(f.warnings, msg) }
 
 func newKey(t *testing.T) ssh.PublicKey {
 	t.Helper()
@@ -246,5 +250,86 @@ func TestHostKeyTOFU(t *testing.T) {
 	}
 	if p2.confirms != 0 {
 		t.Errorf("should not prompt for known or mismatched hosts")
+	}
+}
+
+func TestHostKeySkipsUnparsableLines(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	addr := "nas.local:2222"
+	remote := &net.TCPAddr{IP: net.IPv4(192, 168, 1, 10), Port: 2222}
+	key := newKey(t)
+	futureKey := ssh.Marshal(struct {
+		Name string
+		Blob []byte
+	}{"ssh-future-key", []byte{1, 2, 3}})
+	lines := []string{
+		"# comment",
+		"bad.example ssh-ed25519 !!!not-base64\r", // CRLF line
+		knownhosts.Line([]string{"[nas.local]:2222"}, key),
+		"@unknown-marker host.example ssh-ed25519 AAAA",
+		"new.example ssh-future-key " + base64.StdEncoding.EncodeToString(futureKey),
+		strings.Repeat("x", maxKnownHostsLine+1),
+	}
+	orig := strings.Join(lines, "\n") + "\n"
+	os.WriteFile(kh, []byte(orig), 0o600)
+
+	p := &fakePrompter{}
+	cb, algos, err := newHostKeyCallback(kh, addr, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(algos) != 1 || algos[0] != ssh.KeyAlgoED25519 {
+		t.Errorf("algos = %v", algos)
+	}
+	if err := cb(addr, remote, key); err != nil {
+		t.Errorf("known key: %v", err)
+	}
+	// The mismatch names the real file and the line number in it.
+	err = cb(addr, remote, newKey(t))
+	if err == nil || !strings.Contains(err.Error(), kh+" line 3") {
+		t.Errorf("changed key: err = %v", err)
+	}
+	if p.confirms != 0 {
+		t.Errorf("should not prompt for known or mismatched hosts")
+	}
+	var got []string
+	for _, w := range p.warnings {
+		for _, n := range []string{"2", "4", "5", "6"} {
+			if strings.Contains(w, kh+" line "+n+" ") {
+				got = append(got, n)
+			}
+		}
+	}
+	if strings.Join(got, ",") != "2,4,5,6" {
+		t.Errorf("warnings = %q", p.warnings)
+	}
+
+	// A new host is appended to the real file; the skipped lines are kept.
+	p.confirm = true
+	if err := cb("other.local:22", remote, key); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(kh)
+	if !strings.HasPrefix(string(data), orig) || !strings.Contains(string(data)[len(orig):], "other.local ssh-ed25519 ") {
+		t.Errorf("known_hosts = %q", data)
+	}
+}
+
+func TestHostKeyUnparsableRevokedLineFails(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	os.WriteFile(kh, []byte("@revoked * ssh-ed25519 !!!not-base64\n"), 0o600)
+	if _, _, err := newHostKeyCallback(kh, "nas.local:22", &fakePrompter{}); err == nil || !strings.Contains(err.Error(), "@revoked") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestDialWarnsOnce(t *testing.T) {
+	p := &fakePrompter{}
+	w := &onceWarner{Prompter: p, seen: map[string]bool{}}
+	w.Warn("a")
+	w.Warn("a")
+	w.Warn("b")
+	if strings.Join(p.warnings, ",") != "a,b" {
+		t.Errorf("warnings = %q", p.warnings)
 	}
 }
