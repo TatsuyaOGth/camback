@@ -72,6 +72,13 @@ chmod 755 ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
 
 初めて接続するときは NAS のホスト鍵のフィンガープリントを表示し、確認してから `~/.ssh/known_hosts` に追加します。ホスト鍵が変わっていた場合は、必ず中断します。`known_hosts` に camback が読めない行（対応していない鍵の種類など）があれば、その行を無視して警告を表示します（`@revoked` の行だけは、読めなければ中断します）。
 
+### 開発
+
+```sh
+go test ./...                    # 単体テスト（exiftool がなければ一部をスキップ）
+go test -count=1 -tags e2e ./e2e/...   # Docker の OpenSSH サーバーを相手にした E2E テスト（Linux のみ、Docker と exiftool が必要）
+```
+
 ### ライセンス
 
 MIT
@@ -171,6 +178,13 @@ The first connection shows the NAS host key fingerprint and asks before
 adding it to `~/.ssh/known_hosts`. A changed host key always aborts.
 Lines of `known_hosts` that camback cannot parse (such as unsupported key
 types) are ignored with a warning, except `@revoked` lines, which abort.
+
+### Development
+
+```sh
+go test ./...                    # unit tests (some are skipped without exiftool)
+go test -count=1 -tags e2e ./e2e/...   # end-to-end tests against OpenSSH in Docker (Linux only; needs Docker and exiftool)
+```
 
 ### License
 
