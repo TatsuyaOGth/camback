@@ -91,9 +91,13 @@ func setup(work string) (stop func(), err error) {
 		// A proxy on localhost is only reachable from the host network.
 		args = append(args, "--network", "host", "--build-arg", "HTTP_PROXY", "--build-arg", "HTTPS_PROXY")
 	}
-	if out, err := exec.Command("docker", append(args, "sshd")...).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("docker build: %v\n%s", err, out)
+	// Run the image by the ID this build printed, not by the tag, which
+	// another run on the same daemon may move to its own build.
+	out, err := exec.Command("docker", append(args, "sshd")...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker build: %v", stderrOf(err))
 	}
+	imageID := strings.TrimSpace(string(out))
 
 	server.photoDir = filepath.Join(work, "photo")
 	if err := os.Mkdir(server.photoDir, 0o777); err != nil {
@@ -102,8 +106,8 @@ func setup(work string) (stop func(), err error) {
 	if err := os.Chmod(server.photoDir, 0o777); err != nil { // umask
 		return nil, err
 	}
-	out, err := exec.Command("docker", "run", "-d", "--rm", "-p", "127.0.0.1::22",
-		"-v", server.photoDir+":/volume1/photo", image).Output()
+	out, err = exec.Command("docker", "run", "-d", "--rm", "-p", "127.0.0.1::22",
+		"-v", server.photoDir+":/volume1/photo", imageID).Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker run: %v", stderrOf(err))
 	}

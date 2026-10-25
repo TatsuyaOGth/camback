@@ -76,7 +76,7 @@ chmod 755 ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
 
 ```sh
 go test ./...                    # 単体テスト（exiftool がなければ一部をスキップ）
-go test -tags e2e ./e2e/...      # Docker の OpenSSH サーバーを相手にした E2E テスト（Linux のみ、Docker と exiftool が必要）
+go test -count=1 -tags e2e ./e2e/...   # Docker の OpenSSH サーバーを相手にした E2E テスト（Linux のみ、Docker と exiftool が必要）
 ```
 
 ### ライセンス
@@ -183,7 +183,7 @@ types) are ignored with a warning, except `@revoked` lines, which abort.
 
 ```sh
 go test ./...                    # unit tests (some are skipped without exiftool)
-go test -tags e2e ./e2e/...      # end-to-end tests against OpenSSH in Docker (Linux only; needs Docker and exiftool)
+go test -count=1 -tags e2e ./e2e/...   # end-to-end tests against OpenSSH in Docker (Linux only; needs Docker and exiftool)
 ```
 
 ### License

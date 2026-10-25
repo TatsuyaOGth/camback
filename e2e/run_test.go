@@ -72,6 +72,8 @@ dest = "/photo/%s"
 	if err := os.WriteFile(e.cfg, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The server is shared by all tests (and by every -count iteration).
+	t.Cleanup(func() { os.RemoveAll(filepath.Join(server.photoDir, e.dest)) })
 	if err := os.MkdirAll(filepath.Join(e.home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +288,7 @@ func TestServerRefusesRenameOntoExistingFile(t *testing.T) {
 	if err := fsc.MkdirAll(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(filepath.Join(server.photoDir, t.Name())) })
 	put := func(name, content string) {
 		f, err := fsc.Create(dir + "/" + name)
 		if err != nil {
