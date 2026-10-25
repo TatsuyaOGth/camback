@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,7 +10,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	psftp "github.com/pkg/sftp"
@@ -24,6 +27,20 @@ import (
 type Prompter interface {
 	Password(prompt string) (string, error)
 	Confirm(prompt string) (bool, error)
+	Warn(msg string)
+}
+
+// onceWarner shows each warning once, although Dial may connect again.
+type onceWarner struct {
+	Prompter
+	seen map[string]bool
+}
+
+func (w *onceWarner) Warn(msg string) {
+	if !w.seen[msg] {
+		w.seen[msg] = true
+		w.Prompter.Warn(msg)
+	}
 }
 
 const dialTimeout = 15 * time.Second
@@ -33,8 +50,10 @@ const dialTimeout = 15 * time.Second
 // Authentication order: ssh-agent, key files, password (asked once, never
 // stored). Host keys are checked against ~/.ssh/known_hosts; an unknown host
 // is shown to the user and added on confirmation, a changed key aborts.
+// Lines of known_hosts that cannot be parsed are skipped with a warning.
 func Dial(ctx context.Context, r config.Remote, p Prompter) (*Client, error) {
 	addr := net.JoinHostPort(r.Host, strconv.Itoa(r.Port))
+	p = &onceWarner{Prompter: p, seen: map[string]bool{}}
 	st := &authState{skipped: map[string]bool{}, unlocked: map[string]ssh.Signer{}}
 	for {
 		c, err := dialOnce(ctx, r, p, addr, st)
@@ -239,9 +258,12 @@ func hostKeyCallback(addr string, p Prompter) (ssh.HostKeyCallback, []string, er
 }
 
 func newHostKeyCallback(khPath, addr string, p Prompter) (ssh.HostKeyCallback, []string, error) {
-	base, err := knownhosts.New(khPath)
+	base, skipped, err := loadKnownHosts(khPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read %s: %w", khPath, err)
+	}
+	for _, s := range skipped {
+		p.Warn(fmt.Sprintf("%s line %d is ignored because it cannot be parsed (%s)", khPath, s.line, s.reason))
 	}
 	cb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		err := base(hostname, remote, key)
@@ -253,7 +275,7 @@ func newHostKeyCallback(khPath, addr string, p Prompter) (ssh.HostKeyCallback, [
 			w := ke.Want[0]
 			return fmt.Errorf("HOST KEY MISMATCH for %s: the server's %s key (%s) differs from %s line %d. "+
 				"This may be an attack; if the NAS was reinstalled, remove that line and retry",
-				knownhosts.Normalize(hostname), key.Type(), ssh.FingerprintSHA256(key), w.Filename, w.Line)
+				knownhosts.Normalize(hostname), key.Type(), ssh.FingerprintSHA256(key), khPath, w.Line)
 		}
 		ok, perr := p.Confirm(fmt.Sprintf(
 			"The authenticity of host '%s' can't be established.\n%s key fingerprint is %s.\nTrust this host and add it to %s?",
@@ -264,15 +286,107 @@ func newHostKeyCallback(khPath, addr string, p Prompter) (ssh.HostKeyCallback, [
 		if !ok {
 			return errors.New("host key not trusted")
 		}
-		f, err := os.OpenFile(khPath, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = fmt.Fprintln(f, knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
-		return err
+		return appendKnownHost(khPath, knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
 	}
 	return cb, knownAlgorithms(base, addr), nil
+}
+
+// appendKnownHost adds line to known_hosts on a line of its own, even when
+// the file does not end with a newline; otherwise the new key would join the
+// last line and be lost (or skipped) on the next load.
+func appendKnownHost(khPath, line string) error {
+	data, err := os.ReadFile(khPath)
+	if err != nil {
+		return err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		line = "\n" + line
+	}
+	f, err := os.OpenFile(khPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(f, line)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// skippedLine is a known_hosts line that loadKnownHosts could not parse.
+type skippedLine struct {
+	line   int
+	reason string
+}
+
+// maxKnownHostsLine is the longest line (without its newline) the line
+// scanner in knownhosts can read; a longer line fails the whole file.
+const maxKnownHostsLine = bufio.MaxScanTokenSize - 1
+
+// loadKnownHosts is knownhosts.New, except that a line it cannot parse (a key
+// type x/crypto does not support, a line written by another tool) is skipped
+// instead of failing the whole file. OpenSSH skips such lines too.
+//
+// knownhosts only reads files and stops at the first bad line, so the lines
+// go into a temporary copy, and each bad line is blanked there in turn. Line
+// numbers stay the same as in khPath; KnownKey.Filename names the copy.
+func loadKnownHosts(khPath string) (ssh.HostKeyCallback, []skippedLine, error) {
+	data, err := os.ReadFile(khPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	var skipped []skippedLine
+	blank := func(i int, reason string) error {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "@revoked") {
+			// Ignoring a revocation could accept a key the user meant to block.
+			return fmt.Errorf("line %d: cannot parse a @revoked entry (%s); fix or remove that line", i+1, reason)
+		}
+		if strings.HasSuffix(lines[i], "\n") {
+			lines[i] = "\n" // keep the line count
+		} else {
+			lines[i] = ""
+		}
+		skipped = append(skipped, skippedLine{line: i + 1, reason: reason})
+		return nil
+	}
+	for i, l := range lines {
+		if len(strings.TrimSuffix(l, "\n")) > maxKnownHostsLine {
+			if err := blank(i, "line too long"); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	f, err := os.CreateTemp("", "camback-known_hosts-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	tmp := f.Name()
+	f.Close()
+	defer os.Remove(tmp)
+
+	prefix := "knownhosts: " + tmp + ":"
+	for {
+		if err := os.WriteFile(tmp, []byte(strings.Join(lines, "")), 0o600); err != nil {
+			return nil, nil, err
+		}
+		cb, err := knownhosts.New(tmp)
+		if err == nil {
+			slices.SortFunc(skipped, func(a, b skippedLine) int { return a.line - b.line })
+			return cb, skipped, nil
+		}
+		// Parse errors read "knownhosts: <file>:<line>: <reason>".
+		rest, ok := strings.CutPrefix(err.Error(), prefix)
+		num, reason, ok2 := strings.Cut(rest, ": ")
+		n, nerr := strconv.Atoi(num)
+		if !ok || !ok2 || nerr != nil || n < 1 || n > len(lines) || strings.TrimSpace(lines[n-1]) == "" {
+			return nil, nil, err
+		}
+		if err := blank(n-1, reason); err != nil {
+			return nil, nil, err
+		}
+	}
 }
 
 // knownAlgorithms asks known_hosts which key types it has for addr, so the

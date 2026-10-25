@@ -20,8 +20,9 @@ import (
 
 // scriptedPrompter answers Password prompts from a queue and records them.
 type scriptedPrompter struct {
-	answers []string
-	prompts []string
+	answers  []string
+	prompts  []string
+	warnings []string
 }
 
 func (s *scriptedPrompter) Password(prompt string) (string, error) {
@@ -35,6 +36,7 @@ func (s *scriptedPrompter) Password(prompt string) (string, error) {
 }
 
 func (s *scriptedPrompter) Confirm(string) (bool, error) { return true, nil } // trust the test host key
+func (s *scriptedPrompter) Warn(msg string)              { s.warnings = append(s.warnings, msg) }
 
 func (s *scriptedPrompter) asked(substr string) int {
 	n := 0
@@ -196,5 +198,22 @@ func TestDialSkippedKeyFallsBackToPassword(t *testing.T) {
 	}
 	if p.asked("passphrase") != 1 || p.asked("password") != 1 {
 		t.Errorf("prompts = %q", p.prompts)
+	}
+}
+
+func TestDialSkipsUnparsableKnownHostsLine(t *testing.T) {
+	home := isolateHome(t)
+	keyPath, pub := encryptedKey(t, home, "s3cret")
+	port := startServer(t, pub, "pw")
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.WriteFile(filepath.Join(home, ".ssh", "known_hosts"), []byte("bad.example ssh-ed25519 !!!\n"), 0o600)
+
+	// Skipping the key makes Dial connect twice; the warning is shown once.
+	p := &scriptedPrompter{answers: []string{"", "pw"}}
+	if err := dialTest(t, port, keyPath, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.warnings) != 1 || !strings.Contains(p.warnings[0], "line 1 is ignored") {
+		t.Errorf("warnings = %q", p.warnings)
 	}
 }

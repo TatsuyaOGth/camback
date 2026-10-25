@@ -109,6 +109,9 @@ func (p *termPrompter) Password(prompt string) (string, error) {
 	return string(b), err
 }
 
+// Warn shows a warning; it needs no answer, so it works without a terminal.
+func (p *termPrompter) Warn(msg string) { fmt.Fprintln(p.out, "Warning:", msg) }
+
 // Confirm asks a yes/no question; anything but y/yes is "no".
 func (p *termPrompter) Confirm(prompt string) (bool, error) {
 	if !p.interactive() {
