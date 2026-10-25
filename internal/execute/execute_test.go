@@ -17,7 +17,7 @@ import (
 	"github.com/TatsuyaOGth/camback/internal/transport/fake"
 )
 
-var mtime = time.Date(2026, 10, 16, 9, 26, 27, 0, time.Local)
+var mtime = time.Date(2026, 10, 16, 9, 26, 27, 0, time.FixedZone("JST", 9*60*60))
 
 func setup(t *testing.T, files map[string]string) []source.File {
 	t.Helper()
@@ -74,7 +74,7 @@ func TestRunAndRerun(t *testing.T) {
 	if got, _ := nas.Get("/photo/GR3x/MISC/MEDIAPRO.XML"); string(got) != "v1" {
 		t.Errorf("original MEDIAPRO.XML must be kept, got %q", got)
 	}
-	if got, _ := nas.Get("/photo/GR3x/MISC/MEDIAPRO_20261016-092627.XML"); string(got) != "v2" {
+	if got, _ := nas.Get("/photo/GR3x/MISC/MEDIAPRO_20261016-002627Z.XML"); string(got) != "v2" {
 		t.Errorf("renamed MEDIAPRO = %q", got)
 	}
 	for _, p := range nas.Paths() {

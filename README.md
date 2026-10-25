@@ -8,7 +8,7 @@ Backup your photos. Bring your memories back.
 camback は、カメラのメモリーカードの中身を SFTP で NAS に直接バックアップするコマンドラインツールです。macOS・Windows・Linux で同じように動きます。
 
 - **新しいファイルだけをコピーします。** NAS にすでにある写真は飛ばすので、転送済みの写真をカードに残したままでもかまいません。
-- **既存のファイルは決して上書きしません。** 同じ名前で中身の*違う*写真・動画が NAS にある場合は、何もコピーせずに中断します。カメラの管理ファイル（データベースや XML）のように内容が変わっていくファイルは、古いものを残したまま、時刻付きの名前で隣に保存します（例：`MEDIAPRO_20261016-092627.XML`）。
+- **既存のファイルは決して上書きしません。** 同じ名前で中身の*違う*写真・動画が NAS にある場合は、何もコピーせずに中断します。カメラの管理ファイル（データベースや XML）のように内容が変わっていくファイルは、古いものを残したまま、更新日時（UTC）付きの名前で隣に保存します（例：`MEDIAPRO_20261016-002627Z.XML`）。
 - **カメラを EXIF から自動で判定します。** カード上のすべての写真が、設定ファイルに登録した同じ1台のものでなければ中断するので、別の機材の写真が混ざりません。
 - **先に計画を示してからコピーします。** 何をするかを表示し、確認してから転送します。`--dry-run` を付けると計画の表示だけで終わります。
 - **すべてのファイルを検証します**（SHA-256）。検証が済んでから最終的な名前に変えます。
@@ -88,7 +88,8 @@ SFTP. It works the same on macOS, Windows and Linux.
 - **Nothing is ever overwritten.** If a *different* photo or video with the
   same name is already on the NAS, camback stops before copying anything.
   Other files that change over time (camera databases, XML) are saved next to
-  the old copy with a timestamp, e.g. `MEDIAPRO_20261016-092627.XML`.
+  the old copy with their modification time in UTC, e.g.
+  `MEDIAPRO_20261016-002627Z.XML`.
 - **The camera is detected from EXIF.** Every photo on the card must belong to
   the same configured camera, so shots from different bodies never get mixed.
 - **Plan first, then copy.** camback shows what it will do and asks before

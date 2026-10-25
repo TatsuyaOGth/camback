@@ -168,13 +168,26 @@ func (b *builder) item(dest transport.Path, f source.File) (Item, error) {
 	}
 
 	// Non-media file that changed: keep both under a deterministic name.
-	renamed := it.Dest.Dir().Join(RenamedName(it.Dest.Base(), f.ModTime))
+	orig := it.Dest
+	renamed := orig.Dir().Join(RenamedName(orig.Base(), f.ModTime))
 	it.Dest = renamed
 	prev, err := b.lookup(renamed)
 	if err != nil {
 		return it, err
 	}
 	if prev == nil {
+		// Older versions named it in local time; it may be saved under that.
+		local := orig.Dir().Join(localRenamedName(orig.Base(), f.ModTime))
+		saved, err := b.savedAs(f, local)
+		if err != nil {
+			return it, err
+		}
+		if saved {
+			it.Dest = local
+			it.Action = Same
+			it.Reason = "already saved as " + local.Base()
+			return it, nil
+		}
 		it.Action = Rename
 		return it, nil
 	}
@@ -190,6 +203,16 @@ func (b *builder) item(dest transport.Path, f source.File) (Item, error) {
 	it.Action = Conflict
 	it.Reason = "renamed target " + renamed.Base() + " also exists and differs (" + reason + ")"
 	return it, nil
+}
+
+// savedAs reports whether p exists and holds the same file as f.
+func (b *builder) savedAs(f source.File, p transport.Path) (bool, error) {
+	prev, err := b.lookup(p)
+	if err != nil || prev == nil {
+		return false, err
+	}
+	same, _, err := b.same(f, p, *prev)
+	return same, err
 }
 
 // same runs the three-stage comparison.
@@ -228,13 +251,23 @@ func MtimeClose(a, b time.Time) bool {
 	return d <= MtimeTolerance
 }
 
-// RenamedName inserts the file's modification time (local time) before the
-// extension: MEDIAPRO.XML -> MEDIAPRO_20261016-092627.XML.
+// RenamedName inserts the file's modification time in UTC before the
+// extension: MEDIAPRO.XML -> MEDIAPRO_20261016-002627Z.XML. UTC makes the
+// name the same on every PC, whatever its time zone.
 func RenamedName(base string, mtime time.Time) string {
+	return insertStamp(base, mtime.UTC().Format("20060102-150405Z"))
+}
+
+// localRenamedName is the name older versions used: local time, no "Z".
+func localRenamedName(base string, mtime time.Time) string {
+	return insertStamp(base, mtime.Local().Format("20060102-150405"))
+}
+
+func insertStamp(base, stamp string) string {
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	if stem == "" { // e.g. ".hidden" has no stem; keep the whole name
 		stem, ext = base, ""
 	}
-	return stem + "_" + mtime.Local().Format("20060102-150405") + ext
+	return stem + "_" + stamp + ext
 }
