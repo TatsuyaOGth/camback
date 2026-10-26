@@ -35,7 +35,7 @@ func newClient(fs *psftp.Client, exec func(string) ([]byte, error), shellMap map
 var _ transport.Transport = (*Client)(nil)
 
 func toInfo(fi fs.FileInfo) transport.FileInfo {
-	return transport.FileInfo{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime(), IsDir: fi.IsDir()}
+	return transport.FileInfo{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime(), IsDir: fi.IsDir(), Mode: fi.Mode().Perm()}
 }
 
 func (c *Client) Stat(p transport.Path) (transport.FileInfo, error) {
@@ -85,6 +85,10 @@ func (c *Client) Open(p transport.Path) (io.ReadCloser, error) {
 
 func (c *Client) Chtimes(p transport.Path, mtime time.Time) error {
 	return c.fs.Chtimes(string(p), mtime, mtime)
+}
+
+func (c *Client) Chmod(p transport.Path, mode fs.FileMode) error {
+	return c.fs.Chmod(string(p), mode)
 }
 
 // Rename never replaces an existing file. It checks first, then uses the

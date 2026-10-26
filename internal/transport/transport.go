@@ -8,6 +8,7 @@ package transport
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"path"
 	"time"
 )
@@ -34,6 +35,7 @@ type FileInfo struct {
 	Size    int64
 	ModTime time.Time
 	IsDir   bool
+	Mode    fs.FileMode // permission bits only
 }
 
 // ErrUnsupported is returned by SHA256 when the destination cannot hash
@@ -51,6 +53,9 @@ type Transport interface {
 	Create(p Path) (io.WriteCloser, error)
 	Open(p Path) (io.ReadCloser, error)
 	Chtimes(p Path, mtime time.Time) error
+	// Chmod sets the permission bits. A server may accept it and change
+	// nothing; Stat shows what it did.
+	Chmod(p Path, mode fs.FileMode) error
 	// Rename moves from to to and must never replace an existing file;
 	// it fails with an error satisfying errors.Is(err, fs.ErrExist).
 	Rename(from, to Path) error

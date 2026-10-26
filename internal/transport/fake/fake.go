@@ -20,7 +20,14 @@ type entry struct {
 	data  []byte
 	mtime time.Time
 	dir   bool
+	mode  fs.FileMode
 }
+
+// Default permissions of new entries: those of a server with umask 000.
+const (
+	fileMode fs.FileMode = 0o666
+	dirMode  fs.FileMode = 0o777
+)
 
 // FS is a goroutine-safe in-memory file system.
 type FS struct {
@@ -36,6 +43,11 @@ type FS struct {
 	// WrongHash makes SHA256 return a hash of different content, to simulate
 	// a wrong shell_path_map.
 	WrongHash bool
+	// IgnoreChmod makes Chmod succeed without changing anything, like some
+	// servers do.
+	IgnoreChmod bool
+	// ChmodCalls lists the paths given to Chmod, in order.
+	ChmodCalls []transport.Path
 	// CorruptWrites flips the first byte of every file written via Create,
 	// to simulate a transfer that went wrong.
 	CorruptWrites bool
@@ -43,7 +55,7 @@ type FS struct {
 
 // New returns an empty FS containing only "/".
 func New() *FS {
-	return &FS{entries: map[transport.Path]*entry{"/": {dir: true}}}
+	return &FS{entries: map[transport.Path]*entry{"/": {dir: true, mode: dirMode}}}
 }
 
 func notExist(op string, p transport.Path) error {
@@ -55,7 +67,7 @@ func (f *FS) Put(p transport.Path, data []byte, mtime time.Time) {
 	_ = f.MkdirAll(p.Dir())
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.entries[p] = &entry{data: append([]byte(nil), data...), mtime: mtime}
+	f.entries[p] = &entry{data: append([]byte(nil), data...), mtime: mtime, mode: fileMode}
 }
 
 // Get returns a file's content.
@@ -84,7 +96,7 @@ func (f *FS) Paths() []transport.Path {
 }
 
 func (f *FS) info(p transport.Path, e *entry) transport.FileInfo {
-	return transport.FileInfo{Name: p.Base(), Size: int64(len(e.data)), ModTime: e.mtime, IsDir: e.dir}
+	return transport.FileInfo{Name: p.Base(), Size: int64(len(e.data)), ModTime: e.mtime, IsDir: e.dir, Mode: e.mode}
 }
 
 func (f *FS) Stat(p transport.Path) (transport.FileInfo, error) {
@@ -121,7 +133,7 @@ func (f *FS) MkdirAll(p transport.Path) error {
 				return fmt.Errorf("mkdir %s: not a directory", q)
 			}
 		} else {
-			f.entries[q] = &entry{dir: true}
+			f.entries[q] = &entry{dir: true, mode: dirMode}
 		}
 		if q == "/" || q == "." {
 			return nil
@@ -142,7 +154,7 @@ func (w *writer) Close() error {
 	}
 	w.f.mu.Lock()
 	defer w.f.mu.Unlock()
-	w.f.entries[w.p] = &entry{data: data, mtime: time.Now()}
+	w.f.entries[w.p] = &entry{data: data, mtime: time.Now(), mode: fileMode}
 	return nil
 }
 
@@ -155,7 +167,7 @@ func (f *FS) Create(p transport.Path) (io.WriteCloser, error) {
 	if e, ok := f.entries[p]; ok && e.dir {
 		return nil, fmt.Errorf("create %s: is a directory", p)
 	}
-	f.entries[p] = &entry{mtime: time.Now()}
+	f.entries[p] = &entry{mtime: time.Now(), mode: fileMode}
 	return &writer{f: f, p: p}, nil
 }
 
@@ -178,6 +190,20 @@ func (f *FS) Chtimes(p transport.Path, mtime time.Time) error {
 		return notExist("chtimes", p)
 	}
 	e.mtime = mtime
+	return nil
+}
+
+func (f *FS) Chmod(p transport.Path, mode fs.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ChmodCalls = append(f.ChmodCalls, p)
+	e, ok := f.entries[p]
+	if !ok {
+		return notExist("chmod", p)
+	}
+	if !f.IgnoreChmod {
+		e.mode = mode.Perm()
+	}
 	return nil
 }
 

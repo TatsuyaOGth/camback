@@ -48,8 +48,12 @@ type Progress interface {
 
 // Options configures Run.
 type Options struct {
-	Verify   string // config.VerifyHash or config.VerifySize
-	Jobs     int    // files transferred at the same time; less than 1 means 1
+	Verify string // config.VerifyHash or config.VerifySize
+	Jobs   int    // files transferred at the same time; less than 1 means 1
+	// FileMode and DirMode are the permissions of the files and of the
+	// directories Run creates; 0 leaves them to the server.
+	FileMode fs.FileMode
+	DirMode  fs.FileMode
 	Logger   *slog.Logger
 	Progress Progress
 	Warn     func(msg string)
@@ -66,7 +70,11 @@ type Result struct {
 // time, starting them in plan order. At the first error it starts no more
 // files and cancels the ones in progress, whose temporary files are
 // removed; one already verified by then is still moved into place. Files
-// moved into place are complete and verified.
+// moved into place are complete and verified, and have opt.FileMode.
+//
+// Directories that exist already keep their permissions. When opt.FileMode
+// or opt.DirMode is set and the destination does not apply it, Run stops
+// before transferring anything.
 func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) (*Result, error) {
 	if opt.Logger == nil {
 		opt.Logger = slog.New(slog.DiscardHandler)
@@ -97,10 +105,18 @@ func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) 
 	}
 
 	r := &runner{t: t, opt: opt}
-	if opt.Verify == config.VerifyHash {
-		if err := t.MkdirAll(p.Dest); err != nil {
+	if opt.Verify == config.VerifyHash || opt.FileMode != 0 {
+		// The probe files go here.
+		if err := r.mkdirAll(p.Dest); err != nil {
 			return res, fmt.Errorf("mkdir %s: %w", p.Dest, err)
 		}
+	}
+	if opt.FileMode != 0 {
+		if err := r.probeFileMode(p.Dest); err != nil {
+			return res, err
+		}
+	}
+	if opt.Verify == config.VerifyHash {
 		r.remoteHash, res.VerifyMethod = r.chooseRemoteHash(ctx, p.Dest)
 	}
 
@@ -113,7 +129,7 @@ func Run(ctx context.Context, t transport.Transport, p *plan.Plan, opt Options) 
 			if err := ctx.Err(); err != nil {
 				return res, err
 			}
-			if err := t.MkdirAll(d); err != nil {
+			if err := r.mkdirAll(d); err != nil {
 				return res, fmt.Errorf("mkdir %s: %w", d, err)
 			}
 		}
@@ -167,6 +183,73 @@ type runner struct {
 	t          transport.Transport
 	opt        Options
 	remoteHash func(context.Context, transport.Path) (string, error) // nil when Verify=size
+}
+
+// mkdirAll creates d and its missing parents. With opt.DirMode it gives
+// those, and only those, that mode.
+func (r *runner) mkdirAll(d transport.Path) error {
+	if r.opt.DirMode == 0 {
+		return r.t.MkdirAll(d)
+	}
+	var missing []transport.Path // deepest first
+	for q := d; ; q = q.Dir() {
+		_, err := r.t.Stat(q)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		missing = append(missing, q)
+		if q.Dir() == q { // "/"
+			break
+		}
+	}
+	if err := r.t.MkdirAll(d); err != nil {
+		return err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := r.setMode(missing[i], r.opt.DirMode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// setMode changes p's permissions and checks that the destination applied
+// them: some servers accept chmod and change nothing.
+func (r *runner) setMode(p transport.Path, mode fs.FileMode) error {
+	if err := r.t.Chmod(p, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", p, err)
+	}
+	fi, err := r.t.Stat(p)
+	if err != nil {
+		return fmt.Errorf("chmod %s: %w", p, err)
+	}
+	if fi.Mode != mode {
+		return fmt.Errorf("chmod %s to 0o%03o: the destination reports 0o%03o, so it does not apply permissions; remove file_mode and dir_mode from this remote in the config",
+			p, uint32(mode), uint32(fi.Mode))
+	}
+	return nil
+}
+
+// probeFileMode checks with a probe file that the destination applies
+// opt.FileMode, so that a run does not fail at its first file.
+func (r *runner) probeFileMode(dir transport.Path) error {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return err
+	}
+	probe := dir.Join(".camback-probe-" + hex.EncodeToString(buf))
+	w, err := r.t.Create(probe)
+	if err != nil {
+		return fmt.Errorf("create probe file %s: %w", probe, err)
+	}
+	defer r.t.Remove(probe)
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("create probe file %s: %w", probe, err)
+	}
+	return r.setMode(probe, r.opt.FileMode)
 }
 
 // chooseRemoteHash checks with a probe file whether sha256sum on the
@@ -251,6 +334,13 @@ func (r *runner) transfer(ctx context.Context, it plan.Item, progress io.Writer)
 	}
 	if err := r.verify(ctx, tmp, it.File.Size, localSum); err != nil {
 		return err
+	}
+	// After verifying, which needs to read the file; the probe file showed
+	// that the destination applies the mode.
+	if r.opt.FileMode != 0 {
+		if err := r.t.Chmod(tmp, r.opt.FileMode); err != nil {
+			return fmt.Errorf("chmod %s: %w", tmp, err)
+		}
 	}
 
 	if err := r.t.Rename(tmp, it.Dest); err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,6 +316,76 @@ func TestParallelFailureCancelsOthers(t *testing.T) {
 
 // A card file named like the timestamped name of another, changed file
 // would share its destination (and temporary file) with it.
+func TestModes(t *testing.T) {
+	files := setup(t, map[string]string{
+		"DCIM/100/A.JPG": "aaaa",
+		"MISC/B.XML":     "b",
+	})
+	nas := fake.New()
+	nas.HashSupported = true
+	nas.MkdirAll("/photo") // exists before the run: keeps its mode
+	_, err := Run(context.Background(), nas, mustPlan(t, nas, files), Options{
+		Verify: config.VerifyHash, FileMode: 0o640, DirMode: 0o750,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[transport.Path]fs.FileMode{
+		"/photo":                     0o777,
+		"/photo/GR3x":                0o750,
+		"/photo/GR3x/DCIM":           0o750,
+		"/photo/GR3x/DCIM/100":       0o750,
+		"/photo/GR3x/MISC":           0o750,
+		"/photo/GR3x/DCIM/100/A.JPG": 0o640,
+		"/photo/GR3x/MISC/B.XML":     0o640,
+	}
+	for p, m := range want {
+		if fi, err := nas.Stat(p); err != nil || fi.Mode != m {
+			t.Errorf("%s: mode %v, %v; want %v", p, fi.Mode, err, m)
+		}
+	}
+	// Files are changed under their temporary name, never in place.
+	for _, p := range nas.ChmodCalls {
+		if b := p.Base(); strings.HasPrefix(b, "A.") || strings.HasPrefix(b, "B.") {
+			t.Errorf("chmod on final name %s", p)
+		}
+	}
+}
+
+func TestModesNotSetByDefault(t *testing.T) {
+	files := setup(t, map[string]string{"DCIM/100/A.JPG": "aaaa"})
+	nas := fake.New()
+	if _, err := Run(context.Background(), nas, mustPlan(t, nas, files), Options{Verify: config.VerifySize}); err != nil {
+		t.Fatal(err)
+	}
+	if len(nas.ChmodCalls) > 0 {
+		t.Errorf("chmod called without modes: %v", nas.ChmodCalls)
+	}
+}
+
+func TestModesIgnoredByServer(t *testing.T) {
+	for _, opt := range []Options{
+		{Verify: config.VerifySize, FileMode: 0o644},
+		{Verify: config.VerifySize, DirMode: 0o755},
+	} {
+		t.Run(fmt.Sprintf("file %o dir %o", opt.FileMode, opt.DirMode), func(t *testing.T) {
+			files := setup(t, map[string]string{"DCIM/100/A.JPG": "aaaa"})
+			nas := fake.New()
+			nas.IgnoreChmod = true
+			res, err := Run(context.Background(), nas, mustPlan(t, nas, files), opt)
+			if err == nil || !strings.Contains(err.Error(), "does not apply permissions") {
+				t.Fatalf("err = %v", err)
+			}
+			if res.Files != 0 {
+				t.Errorf("transferred %d files", res.Files)
+			}
+			for _, p := range nas.Paths() {
+				t.Errorf("file left on the destination: %s", p)
+			}
+		})
+	}
+}
+
 func TestDuplicateDestinationRefused(t *testing.T) {
 	files := setup(t, map[string]string{
 		"MISC/STATE.XML":                  "new state",
