@@ -47,7 +47,10 @@ camback              # カードを検出 → 計画を表示 → 確認 → 転
 camback --dry-run    # 計画を表示するだけ
 camback --yes        # 確認せずに転送
 camback --source <dir> --camera <id>   # DCIM フォルダや EXIF のない機器向け
+camback --jobs 1     # 1ファイルずつ転送する（既定は4ファイルずつ同時に転送）
 ```
+
+同時に転送するファイルの数は、`--jobs`（1〜8）か設定ファイルの `[defaults] jobs` で変えられます。小さいファイルが多いカードほど速くなりますが、NAS の負荷（同時に動く `sha256sum` の数）も増えます。
 
 終了コード：`0` 成功、`1` エラー、`2` 衝突（何も転送していない）、`3` キャンセル。
 
@@ -144,7 +147,12 @@ camback              # detect the card, show the plan, confirm, transfer
 camback --dry-run    # show the plan only
 camback --yes        # transfer without asking
 camback --source <dir> --camera <id>   # for devices without a DCIM folder or EXIF
+camback --jobs 1     # one file at a time (by default, 4 files at a time)
 ```
+
+Set how many files are transferred at the same time with `--jobs` (1-8) or
+`jobs` under `[defaults]` in the config. More is faster for cards with many
+small files, but runs more `sha256sum` processes on the NAS at once.
 
 Exit codes: `0` success, `1` error, `2` conflict (nothing transferred),
 `3` cancelled.

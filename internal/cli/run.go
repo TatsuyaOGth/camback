@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -27,6 +28,7 @@ type runOpts struct {
 	source  string
 	camera  string
 	verify  string
+	jobs    optInt
 	dryRun  bool
 	yes     bool
 	eject   bool
@@ -40,11 +42,37 @@ func (o *runOpts) register(cmd *cobra.Command) {
 	f.StringVar(&o.source, "source", "", "use this directory instead of detecting a card")
 	f.StringVar(&o.camera, "camera", "", "camera id, only used when no file has EXIF Make/Model")
 	f.StringVar(&o.verify, "verify", "", `"hash" (default) or "size"`)
+	f.VarP(&o.jobs, "jobs", "j", fmt.Sprintf("files to transfer at the same time, 1-%d (default: defaults.jobs in the config, else %d)", config.MaxJobs, config.DefaultJobs))
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the plan and exit")
 	f.BoolVarP(&o.yes, "yes", "y", false, "do not ask before transferring")
 	f.BoolVar(&o.eject, "eject", false, "eject the card after a successful run without asking")
 	f.BoolVarP(&o.verbose, "verbose", "v", false, "list every NEW file")
 }
+
+// optInt is an int flag that remembers whether it was given, so that an
+// explicit 0 is rejected instead of meaning "not given".
+type optInt struct {
+	n   int
+	set bool
+}
+
+func (o *optInt) String() string {
+	if !o.set {
+		return ""
+	}
+	return strconv.Itoa(o.n)
+}
+
+func (o *optInt) Set(s string) error {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+	o.n, o.set = n, true
+	return nil
+}
+
+func (o *optInt) Type() string { return "int" }
 
 // dialFunc is replaced in tests.
 var dialFunc = func(ctx context.Context, r config.Remote, p sftp.Prompter) (transport.Transport, error) {
@@ -63,6 +91,13 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	}
 	if verify != config.VerifyHash && verify != config.VerifySize {
 		return fmt.Errorf("--verify must be %q or %q", config.VerifyHash, config.VerifySize)
+	}
+	jobs := cfg.Defaults.Jobs
+	if o.jobs.set {
+		jobs = o.jobs.n
+	}
+	if jobs < 1 || jobs > config.MaxJobs {
+		return fmt.Errorf("--jobs must be between 1 and %d", config.MaxJobs)
 	}
 	if err := meta.Check(); err != nil {
 		return err
@@ -165,10 +200,11 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	sameN, _ := p.Count(plan.Same)
 	logger.Info("start", "source", root, "volume", label, "camera", cam.ID, "method", string(res.Method),
 		"remote", fmt.Sprintf("%s@%s:%d", remote.User, remote.Host, remote.Port), "dest", cam.Dest,
-		"new", newN, "new_bytes", newB, "rename", renN, "rename_bytes", renB, "same", sameN, "verify", verify)
+		"new", newN, "new_bytes", newB, "rename", renN, "rename_bytes", renB, "same", sameN, "verify", verify, "jobs", jobs)
 
 	result, err := execute.Run(ctx, t, p, execute.Options{
 		Verify:   verify,
+		Jobs:     jobs,
 		Logger:   logger,
 		Progress: newProgress(a.stderr),
 		Warn:     warn,
