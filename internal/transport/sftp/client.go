@@ -60,6 +60,8 @@ func (c *Client) ReadDir(p transport.Path) ([]transport.FileInfo, error) {
 
 func (c *Client) MkdirAll(p transport.Path) error { return c.fs.MkdirAll(string(p)) }
 
+func (c *Client) Mkdir(p transport.Path) error { return c.fs.Mkdir(string(p)) }
+
 // remoteFile makes io.Copy use concurrent SFTP writes.
 type remoteFile struct{ *psftp.File }
 

@@ -111,7 +111,14 @@ func TestChmod(t *testing.T) {
 			t.Errorf("mode = %v, %v; want %v", fi.Mode, err, mode)
 		}
 	}
-	if fi, err := c.Stat(transport.Path(root)); err != nil || !fi.IsDir || fi.Mode&fs.ModeDir != 0 {
+	d := transport.Path(root).Join("DCIM")
+	if err := c.Mkdir(d); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Mkdir(d); err == nil {
+		t.Error("Mkdir of an existing directory succeeded")
+	}
+	if fi, err := c.Stat(d); err != nil || !fi.IsDir || fi.Mode&fs.ModeDir != 0 {
 		t.Errorf("dir stat = %+v, %v; want permission bits only", fi, err)
 	}
 }

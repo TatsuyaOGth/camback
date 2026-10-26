@@ -186,7 +186,8 @@ type runner struct {
 }
 
 // mkdirAll creates d and its missing parents. With opt.DirMode it gives
-// those, and only those, that mode.
+// those, and only those, that mode: they are created one at a time, and a
+// directory something else created in the meantime is left alone.
 func (r *runner) mkdirAll(d transport.Path) error {
 	if r.opt.DirMode == 0 {
 		return r.t.MkdirAll(d)
@@ -205,11 +206,17 @@ func (r *runner) mkdirAll(d transport.Path) error {
 			break
 		}
 	}
-	if err := r.t.MkdirAll(d); err != nil {
-		return err
-	}
 	for i := len(missing) - 1; i >= 0; i-- {
-		if err := r.setMode(missing[i], r.opt.DirMode); err != nil {
+		q := missing[i]
+		if err := r.t.Mkdir(q); err != nil {
+			// SFTP servers report an existing directory as a generic
+			// failure, so look.
+			if fi, serr := r.t.Stat(q); serr == nil && fi.IsDir {
+				continue
+			}
+			return err
+		}
+		if err := r.setMode(q, r.opt.DirMode); err != nil {
 			return err
 		}
 	}
@@ -335,11 +342,11 @@ func (r *runner) transfer(ctx context.Context, it plan.Item, progress io.Writer)
 	if err := r.verify(ctx, tmp, it.File.Size, localSum); err != nil {
 		return err
 	}
-	// After verifying, which needs to read the file; the probe file showed
-	// that the destination applies the mode.
+	// After verifying, which needs to read the file. Checked for every
+	// file: a directory can have its own ACL that ignores chmod.
 	if r.opt.FileMode != 0 {
-		if err := r.t.Chmod(tmp, r.opt.FileMode); err != nil {
-			return fmt.Errorf("chmod %s: %w", tmp, err)
+		if err := r.setMode(tmp, r.opt.FileMode); err != nil {
+			return err
 		}
 	}
 

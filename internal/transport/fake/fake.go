@@ -141,6 +141,19 @@ func (f *FS) MkdirAll(p transport.Path) error {
 	}
 }
 
+func (f *FS) Mkdir(p transport.Path) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.entries[p]; ok {
+		return &fs.PathError{Op: "mkdir", Path: string(p), Err: fs.ErrExist}
+	}
+	if e, ok := f.entries[p.Dir()]; !ok || !e.dir {
+		return notExist("mkdir", p)
+	}
+	f.entries[p] = &entry{dir: true, mode: dirMode}
+	return nil
+}
+
 type writer struct {
 	f *FS
 	p transport.Path

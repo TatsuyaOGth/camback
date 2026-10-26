@@ -386,6 +386,69 @@ func TestModesIgnoredByServer(t *testing.T) {
 	}
 }
 
+// aclFS ignores chmod under one directory, like a folder with its own ACL.
+type aclFS struct {
+	*fake.FS
+	under transport.Path
+}
+
+func (a *aclFS) Chmod(p transport.Path, mode fs.FileMode) error {
+	if strings.HasPrefix(string(p), string(a.under)+"/") {
+		return nil
+	}
+	return a.FS.Chmod(p, mode)
+}
+
+// The probe file in the destination passes, but a file in a directory that
+// ignores chmod must not get its final name.
+func TestFileModeCheckedForEveryFile(t *testing.T) {
+	files := setup(t, map[string]string{"DCIM/100/A.JPG": "aaaa"})
+	nas := &aclFS{FS: fake.New(), under: "/photo/GR3x/DCIM"}
+	nas.MkdirAll("/photo/GR3x/DCIM/100")
+	res, err := Run(context.Background(), nas, mustPlan(t, nas.FS, files), Options{Verify: config.VerifySize, FileMode: 0o644})
+	if err == nil || !strings.Contains(err.Error(), "does not apply permissions") {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Files != 0 {
+		t.Errorf("transferred %d files", res.Files)
+	}
+	for _, p := range nas.Paths() {
+		t.Errorf("file left on the destination: %s", p)
+	}
+}
+
+// racyFS creates a directory itself just before camback does, like another
+// process would.
+type racyFS struct {
+	*fake.FS
+	race transport.Path
+}
+
+func (r *racyFS) Mkdir(p transport.Path) error {
+	if p == r.race {
+		r.FS.Mkdir(p)
+	}
+	return r.FS.Mkdir(p)
+}
+
+func TestDirModeLeavesDirectoryCreatedByOthers(t *testing.T) {
+	files := setup(t, map[string]string{"DCIM/100/A.JPG": "aaaa"})
+	nas := &racyFS{FS: fake.New(), race: "/photo/GR3x/DCIM"}
+	if _, err := Run(context.Background(), nas, mustPlan(t, nas.FS, files), Options{Verify: config.VerifySize, DirMode: 0o750}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[transport.Path]fs.FileMode{
+		"/photo/GR3x":          0o750,
+		"/photo/GR3x/DCIM":     0o777, // not created by camback
+		"/photo/GR3x/DCIM/100": 0o750,
+	}
+	for p, m := range want {
+		if fi, err := nas.Stat(p); err != nil || fi.Mode != m {
+			t.Errorf("%s: mode %v, %v; want %v", p, fi.Mode, err, m)
+		}
+	}
+}
+
 func TestDuplicateDestinationRefused(t *testing.T) {
 	files := setup(t, map[string]string{
 		"MISC/STATE.XML":                  "new state",

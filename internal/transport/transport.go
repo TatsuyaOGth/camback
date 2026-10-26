@@ -49,6 +49,8 @@ type Transport interface {
 	Stat(p Path) (FileInfo, error)
 	ReadDir(p Path) ([]FileInfo, error)
 	MkdirAll(p Path) error
+	// Mkdir creates one directory and fails if p exists.
+	Mkdir(p Path) error
 	// Create creates or truncates a file for writing.
 	Create(p Path) (io.WriteCloser, error)
 	Open(p Path) (io.ReadCloser, error)
