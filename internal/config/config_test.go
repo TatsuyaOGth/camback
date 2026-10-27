@@ -80,6 +80,12 @@ func TestParseErrors(t *testing.T) {
 		{"relative shell map", `"/photo" = "/volume1/photo"`, `"photo" = "/volume1/photo"`, "shell_path_map"},
 		{"duplicate match across cameras", `volume_label = "Insta360GO3"`, "volume_label = \"Insta360GO3\"\nmatch = [{ make = \" RICOH IMAGING COMPANY, LTD.\", model = \"RICOH GR IIIx\" }]", `is already used by camera "GR3x"`},
 		{"missing user", `user = "user"`, ``, "user: required"},
+		{"file mode without 0o", `port = 2222`, "port = 2222\nfile_mode = 644", "remote.nas.file_mode: 644 is not a permission from 0o000 to 0o777; write it in octal, like 0o600"},
+		{"file mode with special bits", `port = 2222`, "port = 2222\nfile_mode = 0o4644", "remote.nas.file_mode"},
+		{"zero file mode", `port = 2222`, "port = 2222\nfile_mode = 0", "remote.nas.file_mode: 0o000 must give the owner read and write"},
+		{"read-only file mode", `port = 2222`, "port = 2222\nfile_mode = 0o444", "remote.nas.file_mode: 0o444 must give the owner read and write (0o600)"},
+		{"dir mode without search", `port = 2222`, "port = 2222\ndir_mode = 0o644", "remote.nas.dir_mode: 0o644 must give the owner read, write and search (0o700)"},
+		{"string file mode", `port = 2222`, "port = 2222\nfile_mode = \"0644\"", "FileMode"}, // go-toml names the Go field
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +101,28 @@ func TestParseErrors(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestModes(t *testing.T) {
+	cfg, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := cfg.Remotes["nas"]; r.FileMode != nil || r.DirMode != nil {
+		t.Errorf("modes set without being configured: %v %v", r.FileMode, r.DirMode)
+	}
+
+	cfg, err = Parse([]byte(strings.Replace(valid, "port = 2222\n", "port = 2222\nfile_mode = 0o640\ndir_mode = 0o750\n", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Remotes["nas"]
+	if r.FileMode == nil || *r.FileMode != 0o640 {
+		t.Errorf("file_mode = %v, want 0o640", r.FileMode)
+	}
+	if r.DirMode == nil || *r.DirMode != 0o750 {
+		t.Errorf("dir_mode = %v, want 0o750", r.DirMode)
 	}
 }
 

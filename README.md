@@ -40,6 +40,10 @@ go install github.com/TatsuyaOGth/camback/cmd/camback@latest
 camback inspect /Volumes/YOUR_CARD
 ```
 
+NAS 上のファイルとフォルダのパーミッションは、`[remote.<名前>]` の `file_mode` / `dir_mode`（例：`0o644` / `0o755`、`0o` を付けた 8 進数）で指定できます。指定しなければ NAS のサーバー任せです（Synology では `0o666` / `0o777` になることがあります）。指定した場合は、camback が新しく作ったファイルとフォルダだけを変え、すでにあるフォルダはそのままにします。サーバーが指定どおりに設定しない場合は、転送を始める前に中断します。
+
+> **注意（Synology など ACL を使う NAS）：** Windows ACL が有効な共有フォルダでは、パーミッションの変更でファイルの ACL が変わることがあります。使う前に、1 枚だけ転送して File Station などでアクセス権が期待どおりか確認してください。
+
 ### 使い方
 
 ```sh
@@ -139,6 +143,17 @@ To find the `make` / `model` strings of a camera, insert its card and run:
 ```sh
 camback inspect /Volumes/YOUR_CARD
 ```
+
+Set `file_mode` / `dir_mode` under `[remote.<name>]` (in octal, e.g. `0o644`
+/ `0o755`) to choose the permissions of what camback creates on the NAS.
+Without them the server decides (Synology may use `0o666` / `0o777`). Only
+the files and directories camback creates get them; existing directories
+are left alone. If the server does not apply them, camback stops before
+transferring anything.
+
+> **Note (Synology and other NASes with ACLs):** on a shared folder with
+> Windows ACLs, changing permissions can change a file's ACL. Transfer a
+> single photo first and check its access rights, e.g. in File Station.
 
 ### Use
 

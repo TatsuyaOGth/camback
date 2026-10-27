@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,6 +49,11 @@ type Remote struct {
 	// ShellPathMap maps SFTP path prefixes to the paths seen by the SSH shell
 	// (used when running sha256sum on the NAS).
 	ShellPathMap map[string]string `toml:"shell_path_map"`
+	// FileMode and DirMode are the permissions given to the files and the
+	// directories camback creates (e.g. 0o644). nil leaves them to the
+	// server; a pointer, so that an explicit 0 is an error, not "unset".
+	FileMode *fs.FileMode `toml:"file_mode"`
+	DirMode  *fs.FileMode `toml:"dir_mode"`
 }
 
 // Defaults holds settings shared by every camera.
@@ -213,6 +219,18 @@ func (c *Config) Validate() error {
 				add("remote.%s.shell_path_map: %q = %q: both sides must be absolute paths starting with /", name, k, v)
 			}
 		}
+		checkMode := func(key string, m *fs.FileMode, owner fs.FileMode, ownerName string) {
+			switch {
+			case m == nil:
+			case *m > fs.ModePerm:
+				// file_mode = 644 (no 0o) is decimal 644, i.e. 0o1204.
+				add("remote.%s.%s: %d is not a permission from 0o000 to 0o777; write it in octal, like 0o%03o", name, key, uint32(*m), uint32(owner))
+			case *m&owner != owner:
+				add("remote.%s.%s: 0o%03o must give the owner %s (0o%03o)", name, key, uint32(*m), ownerName, uint32(owner))
+			}
+		}
+		checkMode("file_mode", r.FileMode, 0o600, "read and write")
+		checkMode("dir_mode", r.DirMode, 0o700, "read, write and search")
 	}
 
 	seen := map[string]bool{}

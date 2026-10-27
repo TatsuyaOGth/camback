@@ -21,6 +21,14 @@ user = "me"
 # falls back to downloading files to verify them.
 shell_path_map = { "/photo" = "/volume1/photo", "/home" = "/volume1/homes/me" }
 
+# Permissions of the files and directories camback creates, in octal.
+# Without them the server decides (often 0o666 / 0o777 on a NAS). Directories
+# that already exist are left alone. If the server does not apply them (some
+# shared folders with Windows ACLs), camback stops before transferring.
+# On Synology, chmod can change a file's ACL: try one file first.
+# file_mode = 0o644
+# dir_mode = 0o755
+
 [defaults]
 verify = "hash"   # "hash" (sha256sum on the NAS, or read-back) or "size"
 jobs = 4          # files transferred at the same time, 1-8 (--jobs overrides)

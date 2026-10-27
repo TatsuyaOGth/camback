@@ -39,6 +39,7 @@ type env struct {
 
 type envOpt struct {
 	noShellPathMap bool
+	remoteExtra    string // more lines for [remote.nas]
 }
 
 func newEnv(t *testing.T, o envOpt) *env {
@@ -55,6 +56,7 @@ func newEnv(t *testing.T, o envOpt) *env {
 	if o.noShellPathMap {
 		mapLine = ""
 	}
+	mapLine += "\n" + o.remoteExtra
 	cfg := fmt.Sprintf(`
 [remote.nas]
 host = %q
@@ -266,6 +268,41 @@ func TestVerifyMethods(t *testing.T) {
 			e.noLeftovers()
 		})
 	}
+}
+
+func TestModes(t *testing.T) {
+	e := newEnv(t, envOpt{remoteExtra: "file_mode = 0o640\ndir_mode = 0o750"})
+	e.writeCard("MISC/MEDIAPRO.XML", "v1", base)
+	code, out := e.run("--yes")
+	if code != 0 || !strings.Contains(out, "Done: 2 files") {
+		t.Fatalf("code %d", code)
+	}
+	want := map[string]fs.FileMode{
+		"":                        0o750, // dest itself: created by camback
+		"DCIM":                    0o750,
+		"DCIM/100RICOH":           0o750,
+		"MISC":                    0o750,
+		"DCIM/100RICOH/R0001.JPG": 0o640,
+		"MISC/MEDIAPRO.XML":       0o640,
+	}
+	for rel, m := range want {
+		fi, err := os.Stat(e.nas(rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != m {
+			t.Errorf("%q: mode %v, want %v", rel, fi.Mode().Perm(), m)
+		}
+	}
+	// /photo existed before the run.
+	fi, err := os.Stat(server.photoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o777 {
+		t.Errorf("/photo: mode %v, want it unchanged (0o777)", fi.Mode().Perm())
+	}
+	e.noLeftovers()
 }
 
 // The most parallel transfers allowed: each verifies with sha256sum in its

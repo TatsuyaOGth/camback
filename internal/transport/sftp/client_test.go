@@ -95,6 +95,34 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChmod(t *testing.T) {
+	c, root := newTestClient(t, nil)
+	p := transport.Path(root).Join("R0001.JPG")
+	w, err := c.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	for _, mode := range []fs.FileMode{0o640, 0o604} {
+		if err := c.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := c.Stat(p); err != nil || fi.Mode != mode {
+			t.Errorf("mode = %v, %v; want %v", fi.Mode, err, mode)
+		}
+	}
+	d := transport.Path(root).Join("DCIM")
+	if err := c.Mkdir(d); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Mkdir(d); err == nil {
+		t.Error("Mkdir of an existing directory succeeded")
+	}
+	if fi, err := c.Stat(d); err != nil || !fi.IsDir || fi.Mode&fs.ModeDir != 0 {
+		t.Errorf("dir stat = %+v, %v; want permission bits only", fi, err)
+	}
+}
+
 func TestRenameNoClobber(t *testing.T) {
 	c, root := newTestClient(t, nil)
 	a, b := transport.Path(root).Join("a"), transport.Path(root).Join("b")

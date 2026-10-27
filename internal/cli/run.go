@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -202,9 +203,18 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 		"remote", fmt.Sprintf("%s@%s:%d", remote.User, remote.Host, remote.Port), "dest", cam.Dest,
 		"new", newN, "new_bytes", newB, "rename", renN, "rename_bytes", renB, "same", sameN, "verify", verify, "jobs", jobs)
 
+	var fileMode, dirMode fs.FileMode // 0: left to the server
+	if remote.FileMode != nil {
+		fileMode = *remote.FileMode
+	}
+	if remote.DirMode != nil {
+		dirMode = *remote.DirMode
+	}
 	result, err := execute.Run(ctx, t, p, execute.Options{
 		Verify:   verify,
 		Jobs:     jobs,
+		FileMode: fileMode,
+		DirMode:  dirMode,
 		Logger:   logger,
 		Progress: newProgress(a.stderr),
 		Warn:     warn,
