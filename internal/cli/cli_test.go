@@ -12,6 +12,7 @@ import (
 	"github.com/TatsuyaOGth/camback/internal/applog"
 	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/meta"
+	"github.com/TatsuyaOGth/camback/internal/plan"
 	"github.com/TatsuyaOGth/camback/internal/testutil"
 	"github.com/TatsuyaOGth/camback/internal/transport"
 	"github.com/TatsuyaOGth/camback/internal/transport/fake"
@@ -146,6 +147,66 @@ func TestRunConflict(t *testing.T) {
 	}
 	if len(e.nas.Paths()) != 1 {
 		t.Errorf("nothing else should be written: %v", e.nas.Paths())
+	}
+}
+
+func TestRunOnConflict(t *testing.T) {
+	e := newEnv(t)
+	e.nas.Put("/photo/GR3x/DCIM/100RICOH/R0001.DNG", []byte("a different photo"), time.Now().Add(-time.Hour))
+
+	if code, out := e.run("--yes", "--on-conflict", "overwrite"); code != ExitFailure || !strings.Contains(out, "--on-conflict must be") {
+		t.Fatalf("bad value: code %d\n%s", code, out)
+	}
+	code, out := e.run("--yes")
+	if code != ExitConflict || !strings.Contains(out, "--on-conflict skip or rename") {
+		t.Fatalf("abort: code %d\n%s", code, out)
+	}
+
+	code, out = e.run("--yes", "--on-conflict", "skip")
+	t.Log("\n" + out)
+	if code != ExitOK || !strings.Contains(out, "SKIP (conflicting files") || !strings.Contains(out, "Warning: 1 file skipped") {
+		t.Fatalf("skip: code %d\n%s", code, out)
+	}
+	if _, ok := e.nas.Get("/photo/GR3x/DCIM/100RICOH/R0001.JPG"); !ok {
+		t.Errorf("JPG not transferred: %v", e.nas.Paths())
+	}
+	if data, _ := e.nas.Get("/photo/GR3x/DCIM/100RICOH/R0001.DNG"); string(data) != "a different photo" {
+		t.Errorf("skipped file was changed: %q", data)
+	}
+
+	fi, err := os.Stat(filepath.Join(e.card, "DCIM", "100RICOH", "R0001.DNG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := transport.Path("/photo/GR3x/DCIM/100RICOH/" + plan.RenamedName("R0001.DNG", fi.ModTime()))
+	code, out = e.run("--yes", "--on-conflict", "rename")
+	if code != ExitOK || !strings.Contains(out, "Done: 1 file") {
+		t.Fatalf("rename: code %d\n%s", code, out)
+	}
+	if data, _ := e.nas.Get(renamed); string(data) != "raw without exif" {
+		t.Errorf("%s = %q; files: %v", renamed, data, e.nas.Paths())
+	}
+	if data, _ := e.nas.Get("/photo/GR3x/DCIM/100RICOH/R0001.DNG"); string(data) != "a different photo" {
+		t.Errorf("existing file was changed: %q", data)
+	}
+
+	// Saved under the timestamped name: no longer a conflict, whatever on_conflict says.
+	if code, out := e.run("--yes"); code != ExitOK || !strings.Contains(out, "Nothing to transfer: everything") {
+		t.Fatalf("rerun: code %d\n%s", code, out)
+	}
+}
+
+func TestRunOnConflictConfig(t *testing.T) {
+	e := newEnv(t)
+	os.WriteFile(e.cfg, []byte(testConfig+"\n[defaults]\non_conflict = \"skip\"\n"), 0o644)
+	e.nas.Put("/photo/GR3x/DCIM/100RICOH/R0001.DNG", []byte("a different photo"), time.Now().Add(-time.Hour))
+
+	// The flag wins over the config.
+	if code, out := e.run("--dry-run", "--on-conflict", "abort"); code != ExitConflict {
+		t.Fatalf("flag: code %d\n%s", code, out)
+	}
+	if code, out := e.run("--dry-run"); code != ExitOK || !strings.Contains(out, "SKIP") {
+		t.Fatalf("config: code %d\n%s", code, out)
 	}
 }
 

@@ -2,8 +2,11 @@
 //
 // Each file maps to <dest>/<card-relative path>. If something already exists
 // there, it is compared in three stages (size, mtime ±2s, SHA-256). A media
-// file that differs is a CONFLICT and aborts the whole run; any other file
-// that differs is written next to it under a timestamped name (RENAME).
+// file that differs is a CONFLICT; any other file that differs is written
+// next to it under a timestamped name (RENAME), which is a CONFLICT too when
+// that name holds yet another file. Options.OnConflict decides what becomes
+// of a CONFLICT: it stays one and aborts the run, it is skipped (SKIP), or a
+// media file is renamed like any other file.
 package plan
 
 import (
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/hashing"
 	"github.com/TatsuyaOGth/camback/internal/source"
 	"github.com/TatsuyaOGth/camback/internal/transport"
@@ -26,12 +30,13 @@ type Action int
 const (
 	New      Action = iota // not on the destination: transfer
 	Same                   // identical file already there: skip
-	Rename                 // non-media file differs: transfer under a new name
-	Conflict               // media file differs: abort
+	Rename                 // differs: transfer under a new name, keeping the existing one
+	Conflict               // differs and cannot be renamed: abort
+	Skip                   // a conflict left on the card (on_conflict = skip)
 )
 
 func (a Action) String() string {
-	return [...]string{"NEW", "SAME", "RENAME", "CONFLICT"}[a]
+	return [...]string{"NEW", "SAME", "RENAME", "CONFLICT", "SKIP"}[a]
 }
 
 // MtimeTolerance absorbs FAT's 2-second timestamp resolution.
@@ -44,7 +49,7 @@ type Item struct {
 	Action   Action
 	Dest     transport.Path      // where the file goes (the new name for Rename)
 	Existing *transport.FileInfo // what is at the original target, if anything
-	Reason   string              // why it is Same/Conflict
+	Reason   string              // why it is Same/Conflict/Skip
 }
 
 // Plan is the result for one card.
@@ -81,6 +86,8 @@ func (p *Plan) Filter(as ...Action) []Item {
 // Options configures Build.
 type Options struct {
 	IsMedia func(name string) bool
+	// OnConflict is one of the config.OnConflict values; "" means abort.
+	OnConflict string
 	// RemoteHash hashes a destination file for stage 3. Defaults to
 	// downloading it (hashing.ReadBack).
 	RemoteHash func(ctx context.Context, p transport.Path) (string, error)
@@ -143,6 +150,14 @@ func (b *builder) lookup(p transport.Path) (*transport.FileInfo, error) {
 }
 
 func (b *builder) item(dest transport.Path, f source.File) (Item, error) {
+	it, err := b.compare(dest, f)
+	if err == nil && it.Action == Conflict && b.opt.OnConflict == config.OnConflictSkip {
+		it.Action = Skip
+	}
+	return it, err
+}
+
+func (b *builder) compare(dest transport.Path, f source.File) (Item, error) {
 	it := Item{File: f, Media: b.opt.IsMedia(f.Rel), Dest: dest.Join(f.Rel)}
 	existing, err := b.lookup(it.Dest)
 	if err != nil {
@@ -162,14 +177,27 @@ func (b *builder) item(dest transport.Path, f source.File) (Item, error) {
 	case same:
 		it.Action = Same
 		return it, nil
-	case it.Media:
+	}
+
+	// Keep both under a deterministic name: always for non-media files,
+	// for media files only when asked to.
+	orig := it.Dest
+	renamed := orig.Dir().Join(RenamedName(orig.Base(), f.ModTime))
+	if it.Media && b.opt.OnConflict != config.OnConflictRename {
+		// An earlier run with on_conflict = rename may have saved it.
+		saved, err := b.savedAs(f, renamed)
+		if err != nil {
+			return it, err
+		}
+		if saved {
+			it.Dest = renamed
+			it.Action = Same
+			it.Reason = "already saved as " + renamed.Base()
+			return it, nil
+		}
 		it.Action = Conflict
 		return it, nil
 	}
-
-	// Non-media file that changed: keep both under a deterministic name.
-	orig := it.Dest
-	renamed := orig.Dir().Join(RenamedName(orig.Base(), f.ModTime))
 	it.Dest = renamed
 	prev, err := b.lookup(renamed)
 	if err != nil {

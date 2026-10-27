@@ -26,14 +26,15 @@ import (
 )
 
 type runOpts struct {
-	source  string
-	camera  string
-	verify  string
-	jobs    optInt
-	dryRun  bool
-	yes     bool
-	eject   bool
-	verbose bool
+	source   string
+	camera   string
+	verify   string
+	jobs     optInt
+	conflict string
+	dryRun   bool
+	yes      bool
+	eject    bool
+	verbose  bool
 }
 
 // register adds the run flags to cmd. The same flags live on both the root
@@ -44,6 +45,7 @@ func (o *runOpts) register(cmd *cobra.Command) {
 	f.StringVar(&o.camera, "camera", "", "camera id, only used when no file has EXIF Make/Model")
 	f.StringVar(&o.verify, "verify", "", `"hash" (default) or "size"`)
 	f.VarP(&o.jobs, "jobs", "j", fmt.Sprintf("files to transfer at the same time, 1-%d (default: defaults.jobs in the config, else %d)", config.MaxJobs, config.DefaultJobs))
+	f.StringVar(&o.conflict, "on-conflict", "", `when a different file with the same name is on the destination: "abort" (default), "skip" or "rename" (default: defaults.on_conflict in the config)`)
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the plan and exit")
 	f.BoolVarP(&o.yes, "yes", "y", false, "do not ask before transferring")
 	f.BoolVar(&o.eject, "eject", false, "eject the card after a successful run without asking")
@@ -100,6 +102,13 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	if jobs < 1 || jobs > config.MaxJobs {
 		return fmt.Errorf("--jobs must be between 1 and %d", config.MaxJobs)
 	}
+	onConflict := cfg.Defaults.OnConflict
+	if o.conflict != "" {
+		onConflict = o.conflict
+	}
+	if !config.ValidOnConflict(onConflict) {
+		return fmt.Errorf("--on-conflict must be %q, %q or %q", config.OnConflictAbort, config.OnConflictSkip, config.OnConflictRename)
+	}
 	if err := meta.Check(); err != nil {
 		return err
 	}
@@ -153,6 +162,7 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	warn := func(s string) { fmt.Fprintln(a.stderr, "Warning:", s) }
 	p, err := plan.Build(ctx, t, transport.Path(cam.Dest), files, plan.Options{
 		IsMedia:    mediaSet.IsMedia,
+		OnConflict: onConflict,
 		RemoteHash: hashing.NewRemoteHasher(t, warn).Sum,
 	})
 	if err != nil {
@@ -161,17 +171,27 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	printPlan(out, p, o.verbose)
 
 	if n, _ := p.Count(plan.Conflict); n > 0 {
+		hint := ""
+		if onConflict == config.OnConflictAbort {
+			hint = "; to go on without them, use --on-conflict skip or rename"
+		}
 		return &ExitError{Code: ExitConflict, Err: fmt.Errorf(
-			"aborted: %s conflicting with the destination; nothing was transferred", plural(n, "file"))}
+			"aborted: %s conflicting with the destination; nothing was transferred%s", plural(n, "file"), hint)}
 	}
 	if o.dryRun {
 		fmt.Fprintln(out, "Dry run: nothing was transferred.")
 		return nil
 	}
 
+	skipped := p.Filter(plan.Skip)
 	todo := p.Filter(plan.New, plan.Rename)
 	if len(todo) == 0 {
-		fmt.Fprintln(out, "Nothing to transfer: everything is already on the destination.")
+		if len(skipped) == 0 {
+			fmt.Fprintln(out, "Nothing to transfer: everything is already on the destination.")
+		} else {
+			fmt.Fprintln(out, "Nothing to transfer.")
+			warnSkipped(a.stderr, skipped)
+		}
 		return a.maybeEject(root, detected, o.eject)
 	}
 	var total int64
@@ -179,7 +199,11 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 		total += it.File.Size
 	}
 	if !o.yes {
-		ok, err := a.prompt.Confirm(fmt.Sprintf("Transfer %s (%s)?", plural(len(todo), "file"), humanBytes(total)))
+		q := fmt.Sprintf("Transfer %s (%s)?", plural(len(todo), "file"), humanBytes(total))
+		if len(skipped) > 0 {
+			q = fmt.Sprintf("Transfer %s (%s), skipping %d?", plural(len(todo), "file"), humanBytes(total), len(skipped))
+		}
+		ok, err := a.prompt.Confirm(q)
 		if errors.Is(err, errNotInteractive) {
 			return fmt.Errorf("%w; pass --yes to transfer without asking", err)
 		}
@@ -201,7 +225,11 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	sameN, _ := p.Count(plan.Same)
 	logger.Info("start", "source", root, "volume", label, "camera", cam.ID, "method", string(res.Method),
 		"remote", fmt.Sprintf("%s@%s:%d", remote.User, remote.Host, remote.Port), "dest", cam.Dest,
-		"new", newN, "new_bytes", newB, "rename", renN, "rename_bytes", renB, "same", sameN, "verify", verify, "jobs", jobs)
+		"new", newN, "new_bytes", newB, "rename", renN, "rename_bytes", renB, "same", sameN, "skip", len(skipped),
+		"on_conflict", onConflict, "verify", verify, "jobs", jobs)
+	for _, it := range skipped {
+		logger.Warn("skipped", "file", it.File.Rel, "dest", it.Dest.String(), "reason", it.Reason)
+	}
 
 	var fileMode, dirMode fs.FileMode // 0: left to the server
 	if remote.FileMode != nil {
@@ -238,6 +266,7 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 	}
 	fmt.Fprintf(out, "Done: %s (%s), verified by %s.\nLog: %s\n",
 		plural(result.Files, "file"), humanBytes(result.Bytes), result.VerifyMethod, logPath)
+	warnSkipped(a.stderr, skipped)
 	return a.maybeEject(root, detected, o.eject)
 }
 

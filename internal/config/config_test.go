@@ -38,6 +38,9 @@ func TestParseValid(t *testing.T) {
 	if cfg.Defaults.Jobs != DefaultJobs {
 		t.Errorf("jobs default = %d", cfg.Defaults.Jobs)
 	}
+	if cfg.Defaults.OnConflict != OnConflictAbort {
+		t.Errorf("on_conflict default = %q", cfg.Defaults.OnConflict)
+	}
 	if got := cfg.Cameras[0].Dest; got != "/photo/GR3x" {
 		t.Errorf("dest not cleaned: %q", got)
 	}
@@ -73,6 +76,7 @@ func TestParseErrors(t *testing.T) {
 		{"too many jobs", `[remote.nas]`, "[defaults]\njobs = 9\n[remote.nas]", "defaults.jobs: must be between 1 and 8"},
 		{"negative jobs", `[remote.nas]`, "[defaults]\njobs = -1\n[remote.nas]", "defaults.jobs"},
 		{"zero jobs", `[remote.nas]`, "[defaults]\njobs = 0\n[remote.nas]", "defaults.jobs: must be between 1 and 8, got 0"},
+		{"bad on_conflict", `[remote.nas]`, "[defaults]\non_conflict = \"overwrite\"\n[remote.nas]", `defaults.on_conflict: must be "abort", "skip" or "rename", got "overwrite"`},
 		{"relative dest", `dest = "/photo/GR3x/"`, `dest = "photo/GR3x"`, "absolute SFTP path"},
 		{"undefined remote", `remote = "nas"`, `remote = "nas2"`, `remote "nas2" is not defined`},
 		{"duplicate id", `id = "Go3"`, `id = "GR3x"`, "duplicate id"},
