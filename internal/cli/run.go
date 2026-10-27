@@ -185,20 +185,15 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 
 	skipped := p.Filter(plan.Skip)
 	todo := p.Filter(plan.New, plan.Rename)
-	if len(todo) == 0 {
-		if len(skipped) == 0 {
-			fmt.Fprintln(out, "Nothing to transfer: everything is already on the destination.")
-		} else {
-			fmt.Fprintln(out, "Nothing to transfer.")
-			warnSkipped(a.stderr, skipped)
-		}
+	if len(todo) == 0 && len(skipped) == 0 {
+		fmt.Fprintln(out, "Nothing to transfer: everything is already on the destination.")
 		return a.maybeEject(root, detected, o.eject)
 	}
 	var total int64
 	for _, it := range todo {
 		total += it.File.Size
 	}
-	if !o.yes {
+	if len(todo) > 0 && !o.yes {
 		q := fmt.Sprintf("Transfer %s (%s)?", plural(len(todo), "file"), humanBytes(total))
 		if len(skipped) > 0 {
 			q = fmt.Sprintf("Transfer %s (%s), skipping %d?", plural(len(todo), "file"), humanBytes(total), len(skipped))
@@ -229,6 +224,13 @@ func (a *app) run(ctx context.Context, o *runOpts) error {
 		"on_conflict", onConflict, "verify", verify, "jobs", jobs)
 	for _, it := range skipped {
 		logger.Warn("skipped", "file", it.File.Rel, "dest", it.Dest.String(), "reason", it.Reason)
+	}
+	if len(todo) == 0 {
+		// Only skipped files: the log still records that they are on the card only.
+		logger.Info("end", "files", 0, "bytes", 0, "ok", true)
+		fmt.Fprintf(out, "Nothing to transfer.\nLog: %s\n", logPath)
+		warnSkipped(a.stderr, skipped)
+		return a.maybeEject(root, detected, o.eject)
 	}
 
 	var fileMode, dirMode fs.FileMode // 0: left to the server

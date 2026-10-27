@@ -174,6 +174,28 @@ func TestRunOnConflict(t *testing.T) {
 		t.Errorf("skipped file was changed: %q", data)
 	}
 
+	// Nothing left but the skipped file: no question to ask, and it is still logged.
+	code, out = e.run("--on-conflict", "skip")
+	if code != ExitOK || !strings.Contains(out, "Nothing to transfer.\nLog: ") || !strings.Contains(out, "Warning: 1 file skipped") {
+		t.Fatalf("skip only: code %d\n%s", code, out)
+	}
+	logDir, err := applog.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs, _ := filepath.Glob(filepath.Join(logDir, "*.jsonl"))
+	if len(logs) != 2 {
+		t.Fatalf("expected a log per run with a skipped file, got %v", logs)
+	}
+	var found bool
+	for _, l := range logs {
+		data, _ := os.ReadFile(l)
+		found = found || strings.Count(string(data), `"msg":"skipped"`) == 1 && !strings.Contains(string(data), `"msg":"transferred"`)
+	}
+	if !found {
+		t.Errorf("no log records the skipped file of the run that transferred nothing")
+	}
+
 	fi, err := os.Stat(filepath.Join(e.card, "DCIM", "100RICOH", "R0001.DNG"))
 	if err != nil {
 		t.Fatal(err)
