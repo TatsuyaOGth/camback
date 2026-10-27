@@ -8,7 +8,7 @@ Backup your photos. Bring your memories back.
 camback は、カメラのメモリーカードの中身を SFTP で NAS に直接バックアップするコマンドラインツールです。macOS・Windows・Linux で同じように動きます。
 
 - **新しいファイルだけをコピーします。** NAS にすでにある写真は飛ばすので、転送済みの写真をカードに残したままでもかまいません。
-- **既存のファイルは決して上書きしません。** 同じ名前で中身の*違う*写真・動画が NAS にある場合は、何もコピーせずに中断します。カメラの管理ファイル（データベースや XML）のように内容が変わっていくファイルは、古いものを残したまま、更新日時（UTC）付きの名前で隣に保存します（例：`MEDIAPRO_20261016-002627Z.XML`）。
+- **既存のファイルは決して上書きしません。** 同じ名前で中身の*違う*写真・動画が NAS にある場合は、何もコピーせずに中断します（`--on-conflict` で、そのファイルだけ飛ばすことも、隣に別の名前で保存することもできます）。カメラの管理ファイル（データベースや XML）のように内容が変わっていくファイルは、古いものを残したまま、更新日時（UTC）付きの名前で隣に保存します（例：`MEDIAPRO_20261016-002627Z.XML`）。
 - **カメラを EXIF から自動で判定します。** カード上のすべての写真が、設定ファイルに登録した同じ1台のものでなければ中断するので、別の機材の写真が混ざりません。
 - **先に計画を示してからコピーします。** 何をするかを表示し、確認してから転送します。`--dry-run` を付けると計画の表示だけで終わります。
 - **すべてのファイルを検証します**（SHA-256）。検証が済んでから最終的な名前に変えます。
@@ -52,11 +52,20 @@ camback --dry-run    # 計画を表示するだけ
 camback --yes        # 確認せずに転送
 camback --source <dir> --camera <id>   # DCIM フォルダや EXIF のない機器向け
 camback --jobs 1     # 1ファイルずつ転送する（既定は4ファイルずつ同時に転送）
+camback --on-conflict rename   # 衝突したファイルを隣に別の名前で保存する
 ```
 
 同時に転送するファイルの数は、`--jobs`（1〜8）か設定ファイルの `[defaults] jobs` で変えられます。小さいファイルが多いカードほど速くなりますが、NAS の負荷（同時に動く `sha256sum` の数）も増えます。
 
-終了コード：`0` 成功、`1` エラー、`2` 衝突（何も転送していない）、`3` キャンセル。
+同じ名前で中身の違うファイルが NAS にある（衝突する）ときの動作は、`--on-conflict` か設定ファイルの `[defaults] on_conflict` で選べます。
+
+- `abort`（既定）：何も転送せずに中断します。
+- `skip`：衝突したファイルだけ転送せず、ほかのファイルを転送します。飛ばしたファイルは最後に一覧を表示します。**カードにしか残っていないので、カードを消す前に確かめてください。**
+- `rename`：NAS のファイルはそのまま残し、カードのファイルを更新日時（UTC）付きの名前で隣に保存します（例：`R0001185_20261016-002627Z.DNG`）。その名前も別のファイルで埋まっていれば中断します。
+
+カメラがファイル番号を使い直したとき（カードのフォーマットや番号のリセットのあと）によく衝突します。この場合はどちらも別の写真なので、`rename` を使えば両方残せます。一度この名前で保存したファイルは、次からはどの設定でも保存済みとして飛ばします。
+
+終了コード：`0` 成功（`skip` で飛ばしたファイルがあっても）、`1` エラー、`2` 衝突（転送の前に見つかった場合は何も転送していません。転送中に NAS 側にファイルが現れた場合は、それまでのファイルは転送済みです）、`3` キャンセル。
 
 Ctrl-C を1回押すと、処理の切れ目で安全に止まります（転送中の一時ファイルは削除します）。もう1回押すと即座に終了します。
 
@@ -100,7 +109,8 @@ SFTP. It works the same on macOS, Windows and Linux.
 - **Only new files are copied.** Photos already on the NAS are skipped, so you
   can leave old shots on the card.
 - **Nothing is ever overwritten.** If a *different* photo or video with the
-  same name is already on the NAS, camback stops before copying anything.
+  same name is already on the NAS, camback stops before copying anything
+  (or, with `--on-conflict`, skips it or saves it next to the other one).
   Other files that change over time (camera databases, XML) are saved next to
   the old copy with their modification time in UTC, e.g.
   `MEDIAPRO_20261016-002627Z.XML`.
@@ -163,13 +173,32 @@ camback --dry-run    # show the plan only
 camback --yes        # transfer without asking
 camback --source <dir> --camera <id>   # for devices without a DCIM folder or EXIF
 camback --jobs 1     # one file at a time (by default, 4 files at a time)
+camback --on-conflict rename   # save conflicting files next to the other one
 ```
 
 Set how many files are transferred at the same time with `--jobs` (1-8) or
 `jobs` under `[defaults]` in the config. More is faster for cards with many
 small files, but runs more `sha256sum` processes on the NAS at once.
 
-Exit codes: `0` success, `1` error, `2` conflict (nothing transferred),
+Choose what happens when a different file with the same name is already on
+the NAS (a conflict) with `--on-conflict` or `on_conflict` under
+`[defaults]` in the config:
+
+- `abort` (default): stop without transferring anything.
+- `skip`: transfer everything else and list the conflicting files at the
+  end. **They are only on the card, so check them before erasing it.**
+- `rename`: keep the file on the NAS and save the one from the card next to
+  it with its modification time in UTC, e.g. `R0001185_20261016-002627Z.DNG`.
+  If that name is taken by yet another file, camback stops.
+
+Conflicts usually mean the camera reused its file numbers (after formatting
+the card or resetting the numbering): both are different photos, and
+`rename` keeps both. A file once saved under its timestamped name is skipped
+as already saved from then on, whatever `on_conflict` says.
+
+Exit codes: `0` success (even if `skip` left files out), `1` error,
+`2` conflict (nothing transferred when found before transferring; files
+transferred until then when one appeared on the NAS during the transfer),
 `3` cancelled.
 
 Press Ctrl-C once to stop safely at the next step (a partially written file is

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/media"
 	"github.com/TatsuyaOGth/camback/internal/source"
 	"github.com/TatsuyaOGth/camback/internal/transport"
@@ -37,7 +38,12 @@ func card(t *testing.T, files map[string]string, mtime time.Time) []source.File 
 
 func build(t *testing.T, nas *fake.FS, files []source.File) *Plan {
 	t.Helper()
-	p, err := Build(context.Background(), nas, "/photo/GR3x", files, Options{IsMedia: media.NewSet(nil).IsMedia})
+	return buildWith(t, nas, files, "")
+}
+
+func buildWith(t *testing.T, nas *fake.FS, files []source.File, onConflict string) *Plan {
+	t.Helper()
+	p, err := Build(context.Background(), nas, "/photo/GR3x", files, Options{IsMedia: media.NewSet(nil).IsMedia, OnConflict: onConflict})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,5 +202,47 @@ func TestBuildCancelled(t *testing.T) {
 	cancel()
 	if _, err := Build(ctx, fake.New(), "/photo/GR3x", files, Options{IsMedia: media.NewSet(nil).IsMedia}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestBuildOnConflict(t *testing.T) {
+	files := card(t, map[string]string{
+		"DCIM/100/DIFF.DNG":  "AAAA",
+		"DCIM/100/SAVED.DNG": "v2",
+		"DCIM/100/DIR.JPG":   "d",
+		"MISC/CLASH.XML":     "v4",
+	}, base)
+	nas := fake.New()
+	nas.Put("/photo/GR3x/DCIM/100/DIFF.DNG", []byte("BBBB"), base.Add(time.Hour))
+	// An earlier run with on_conflict = rename saved this one.
+	nas.Put("/photo/GR3x/DCIM/100/SAVED.DNG", []byte("v1"), base.Add(-time.Hour))
+	nas.Put("/photo/GR3x/DCIM/100/SAVED_20261016-002627Z.DNG", []byte("v2"), base)
+	nas.MkdirAll("/photo/GR3x/DCIM/100/DIR.JPG")
+	nas.Put("/photo/GR3x/MISC/CLASH.XML", []byte("old"), base.Add(-time.Hour))
+	nas.Put("/photo/GR3x/MISC/CLASH_20261016-002627Z.XML", []byte("zz"), base.Add(time.Hour))
+
+	cases := []struct {
+		onConflict string
+		want       map[string]Action
+	}{
+		{"", map[string]Action{"DCIM/100/DIFF.DNG": Conflict, "DCIM/100/SAVED.DNG": Same, "DCIM/100/DIR.JPG": Conflict, "MISC/CLASH.XML": Conflict}},
+		{config.OnConflictAbort, map[string]Action{"DCIM/100/DIFF.DNG": Conflict, "DCIM/100/SAVED.DNG": Same, "DCIM/100/DIR.JPG": Conflict, "MISC/CLASH.XML": Conflict}},
+		{config.OnConflictSkip, map[string]Action{"DCIM/100/DIFF.DNG": Skip, "DCIM/100/SAVED.DNG": Same, "DCIM/100/DIR.JPG": Skip, "MISC/CLASH.XML": Skip}},
+		// The renamed target of CLASH.XML holds yet another file: nothing to rename to.
+		{config.OnConflictRename, map[string]Action{"DCIM/100/DIFF.DNG": Rename, "DCIM/100/SAVED.DNG": Same, "DCIM/100/DIR.JPG": Rename, "MISC/CLASH.XML": Conflict}},
+	}
+	for _, c := range cases {
+		p := buildWith(t, nas, files, c.onConflict)
+		got := actions(p)
+		for rel, a := range c.want {
+			if got[rel] != a {
+				t.Errorf("on_conflict %q: %s: got %s, want %s", c.onConflict, rel, got[rel], a)
+			}
+		}
+		for _, it := range p.Items {
+			if it.File.Rel == "DCIM/100/DIFF.DNG" && it.Action == Rename && it.Dest != "/photo/GR3x/DCIM/100/DIFF_20261016-002627Z.DNG" {
+				t.Errorf("DIFF.DNG renamed to %s", it.Dest)
+			}
+		}
 	}
 }

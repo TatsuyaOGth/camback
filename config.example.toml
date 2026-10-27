@@ -32,9 +32,14 @@ shell_path_map = { "/photo" = "/volume1/photo", "/home" = "/volume1/homes/me" }
 [defaults]
 verify = "hash"   # "hash" (sha256sum on the NAS, or read-back) or "size"
 jobs = 4          # files transferred at the same time, 1-8 (--jobs overrides)
-# Extensions treated as photos/videos. A changed media file aborts the run;
-# any other changed file is saved under a timestamped name. Omit to use the
-# built-in list.
+# When a different photo/video with the same name is already on the NAS:
+# "abort" (stop before transferring anything), "skip" (leave it on the card
+# only) or "rename" (save it next to the other one under a timestamped name).
+# --on-conflict overrides.
+on_conflict = "abort"
+# Extensions treated as photos/videos. A changed media file is a conflict
+# (see on_conflict); any other changed file is saved under a timestamped
+# name. Omit to use the built-in list.
 # media_extensions = ["JPG", "DNG", "ARW", "RAF", "X3F", "MP4", "MOV"]
 # Extra exclusions (path.Match syntax). Without "/" a pattern matches any path
 # element, with "/" the whole card-relative path. Dotfiles and OS

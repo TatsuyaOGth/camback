@@ -25,6 +25,14 @@ const (
 	VerifySize = "size"
 )
 
+// What to do with a file that conflicts with the destination (a different
+// photo or video with the same name, or a timestamped name that is taken).
+const (
+	OnConflictAbort  = "abort"  // stop before transferring anything
+	OnConflictSkip   = "skip"   // leave the file on the card only
+	OnConflictRename = "rename" // save it next to the other one under a timestamped name
+)
+
 // Parallel transfers.
 const (
 	DefaultJobs = 4
@@ -60,6 +68,7 @@ type Remote struct {
 type Defaults struct {
 	Verify          string   `toml:"verify"`
 	Jobs            int      `toml:"jobs"` // files transferred at the same time
+	OnConflict      string   `toml:"on_conflict"`
 	MediaExtensions []string `toml:"media_extensions"`
 	Exclude         []string `toml:"exclude"`
 }
@@ -77,6 +86,15 @@ type Camera struct {
 type Match struct {
 	Make  string `toml:"make"`
 	Model string `toml:"model"`
+}
+
+// ValidOnConflict reports whether s is one of the OnConflict values.
+func ValidOnConflict(s string) bool {
+	switch s {
+	case OnConflictAbort, OnConflictSkip, OnConflictRename:
+		return true
+	}
+	return false
 }
 
 // DefaultPath returns the per-OS default config file location.
@@ -160,6 +178,9 @@ func (c *Config) applyDefaults() {
 	if c.Defaults.Verify == "" {
 		c.Defaults.Verify = VerifyHash
 	}
+	if c.Defaults.OnConflict == "" {
+		c.Defaults.OnConflict = OnConflictAbort
+	}
 	for name, r := range c.Remotes {
 		if r.Port == 0 {
 			r.Port = 22
@@ -183,6 +204,9 @@ func (c *Config) Validate() error {
 	case VerifyHash, VerifySize:
 	default:
 		add("defaults.verify: must be %q or %q, got %q", VerifyHash, VerifySize, c.Defaults.Verify)
+	}
+	if !ValidOnConflict(c.Defaults.OnConflict) {
+		add("defaults.on_conflict: must be %q, %q or %q, got %q", OnConflictAbort, OnConflictSkip, OnConflictRename, c.Defaults.OnConflict)
 	}
 	if j := c.Defaults.Jobs; j < 1 || j > MaxJobs {
 		add("defaults.jobs: must be between 1 and %d, got %d", MaxJobs, j)
