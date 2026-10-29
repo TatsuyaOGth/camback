@@ -323,3 +323,62 @@ func TestTraceHostKeyPromptErrorIsKept(t *testing.T) {
 		t.Errorf("err = %v, failed = %d; doctor needs the prompt's error to suggest a terminal", err, tr.Failed)
 	}
 }
+
+// startDroppingServer runs an SSH server that closes the connection after
+// the key exchange, before answering any login, as a NAS that blocks the
+// client's address does.
+func startDroppingServer(t *testing.T) int {
+	t.Helper()
+	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
+	hostSigner, err := ssh.NewSignerFromKey(hostPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			cfg := &ssh.ServerConfig{
+				PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, errors.New("no") },
+				// Called after the key exchange, at the first login request.
+				BannerCallback: func(ssh.ConnMetadata) string { conn.Close(); return "" },
+			}
+			cfg.AddHostKey(hostSigner)
+			go ssh.NewServerConn(conn, cfg)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestTraceDroppedBeforeLogin(t *testing.T) {
+	isolateHome(t)
+	port := startDroppingServer(t)
+	p := &scriptedPrompter{answers: []string{"pw"}}
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, p)
+	if err == nil || tr.Failed != StageAuthStart || tr.HostKey == nil {
+		t.Errorf("failed = %d, want %d (err = %v)", tr.Failed, StageAuthStart, err)
+	}
+	if len(p.prompts) != 0 {
+		t.Errorf("asked %q, though no login was tried", p.prompts)
+	}
+}
+
+func TestTraceLoginRejected(t *testing.T) {
+	home := isolateHome(t)
+	keyPath, _ := encryptedKey(t, home, "s3cret")
+	_, other := encryptedKey(t, t.TempDir(), "x")
+	port := startServer(t, other, "pw")
+	// The server does not accept the key, and the password prompt fails:
+	// a login was tried, unlike when the server drops the connection.
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u", IdentityFile: keyPath}, &scriptedPrompter{})
+	if err == nil || tr.Failed != StageAuth {
+		t.Errorf("failed = %d, want %d (err = %v)", tr.Failed, StageAuth, err)
+	}
+}

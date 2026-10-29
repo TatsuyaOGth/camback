@@ -46,7 +46,7 @@ func TestDoctor(t *testing.T) {
 		t.Fatalf("--write-test: code %d", code)
 	}
 	wantLines(t, out,
-		"OK    write access: wrote and removed a probe file in /photo\n",
+		"OK    write access: can write in /photo\n",
 		"OK    sha256sum on the NAS: matches the probe file",
 		"OK    file_mode: 0o640 is applied",
 		"OK    dir_mode: 0o750 is applied",

@@ -70,6 +70,7 @@ const (
 )
 
 type doctor struct {
+	ctx          context.Context
 	out          io.Writer
 	warns, fails int
 }
@@ -77,7 +78,13 @@ type doctor struct {
 func (d *doctor) section(title string) { fmt.Fprintf(d.out, "\n%s\n", title) }
 
 // report prints one item. fix, if any, says what to do about it.
+//
+// After Ctrl-C nothing is reported: a check that was running fails because
+// of the cancellation, which says nothing about the setup.
 func (d *doctor) report(st status, what, detail, fix string) {
+	if d.ctx.Err() != nil {
+		return
+	}
 	switch st {
 	case statusWarn:
 		d.warns++
@@ -99,7 +106,7 @@ func (d *doctor) report(st status, what, detail, fix string) {
 }
 
 func (a *app) doctor(ctx context.Context, writeTest bool) error {
-	d := &doctor{out: a.stdout}
+	d := &doctor{ctx: ctx, out: a.stdout}
 
 	d.section("exiftool")
 	if v, p, err := meta.Version(ctx); err != nil {
@@ -124,6 +131,9 @@ func (a *app) doctor(ctx context.Context, writeTest bool) error {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.section("Memory cards")
 	d.cards(cfg)
 
@@ -148,10 +158,15 @@ func (d *doctor) config(flag string) *config.Config {
 		return nil
 	}
 	cfg, err := config.Load(p)
+	var pathErr *fs.PathError // reading the file failed; the content was not looked at
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		d.report(statusFail, "config file", fmt.Sprintf("%s (%s) does not exist", p, from),
 			fmt.Sprintf("copy config.example.toml there and edit it, or point --config or $%s at your config file", config.EnvConfig))
+		return nil
+	case errors.As(err, &pathErr):
+		d.report(statusFail, "config file", fmt.Sprintf("cannot read %s (%s): %v", p, from, pathErr.Err),
+			"check that it is a file you may read")
 		return nil
 	case err != nil:
 		d.report(statusFail, "config file", fmt.Sprintf("%s (%s) is not valid:\n%v", p, from, err), "fix the items above")
@@ -259,6 +274,11 @@ func (d *doctor) connection(r config.Remote, tr *sftp.Trace, err error) {
 			fix = "run camback doctor in a terminal to see the host key and trust it"
 		}
 		d.report(statusFail, "host key", err.Error(), fix)
+		return
+	}
+	if failed(sftp.StageAuthStart) {
+		d.report(statusFail, "login", "the NAS closed the connection before any login was tried: "+err.Error(),
+			"the NAS may be blocking this computer after failed logins (Synology: Control Panel > Security > Protection) or have too many connections open")
 		return
 	}
 	switch {
@@ -384,7 +404,7 @@ func (d *doctor) writeTest(t transport.Transport, r config.Remote, dir transport
 			fmt.Sprintf("give %s write permission on that shared folder", r.User))
 		return
 	}
-	d.report(statusOK, "write access", "wrote and removed a probe file in "+dir.String(), "")
+	d.report(statusOK, "write access", "can write in "+dir.String(), "")
 
 	sum := sha256.Sum256(buf)
 	d.remoteHash(hashing.CheckRemote(t, probe, hex.EncodeToString(sum[:])), "matches the probe file", shellNote)
@@ -438,9 +458,18 @@ func existingParent(t transport.Transport, p transport.Path) (transport.Path, er
 // sampleMaxDirs bounds how many folders sampleFile lists.
 const sampleMaxDirs = 20
 
+// nasOnly reports whether a name in dest was made by the NAS or by camback,
+// not copied from a card: hidden files (such as leftovers of an interrupted
+// run) and Synology's folders like "@eaDir" (thumbnails, one folder per
+// photo) and "#recycle". Their owner and permissions can differ from those
+// of the backed-up files.
+func nasOnly(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") || strings.HasPrefix(name, "#")
+}
+
 // sampleFile returns the smallest non-empty file found in the first folders
-// under dir (breadth first), or "" if there is none. Hidden files, such as
-// leftovers of an interrupted run, are ignored.
+// under dir (breadth first), or "" if there is none. What nasOnly reports is
+// ignored, so the sample is a file a run could have written.
 func sampleFile(t transport.Transport, dir transport.Path) (transport.Path, error) {
 	queue := []transport.Path{dir}
 	var best transport.Path
@@ -458,7 +487,7 @@ func sampleFile(t transport.Transport, dir transport.Path) (transport.Path, erro
 		sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 		for _, fi := range list {
 			switch {
-			case strings.HasPrefix(fi.Name, "."):
+			case nasOnly(fi.Name):
 			case fi.IsDir:
 				queue = append(queue, d.Join(fi.Name))
 			case fi.Size > 0 && (best == "" || fi.Size < bestSize):

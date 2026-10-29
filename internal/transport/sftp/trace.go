@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 
@@ -19,6 +20,7 @@ const (
 	StageConnect                    // open the TCP connection
 	StageHandshake                  // agree on SSH algorithms with the server
 	StageHostKey                    // check the server's key against known_hosts
+	StageAuthStart                  // the server goes on to the login (fails when it drops the connection first)
 	StageAuth                       // log in
 	StageSFTP                       // start the SFTP subsystem
 )
@@ -34,11 +36,28 @@ type Trace struct {
 	HostKeyAdded bool          // the user trusted it just now; it was added to known_hosts
 	Auth         string        // how the login succeeded, e.g. "password"
 	Failed       Stage         // the stage that failed; 0 when DialTrace succeeded
+
+	authTried bool // a password was asked or a key the server accepted was used
 }
 
 // DialTrace is Dial that records each stage in tr.
 func DialTrace(ctx context.Context, r config.Remote, p Prompter, tr *Trace) (*Client, error) {
 	return dial(ctx, r, p, tr)
+}
+
+// start clears what an earlier attempt of the same Dial recorded (one that
+// skipped a key).
+func (t *Trace) start() {
+	if t != nil {
+		t.Failed, t.Auth, t.authTried = 0, "", false
+	}
+}
+
+// connected records the address the TCP connection reached.
+func (t *Trace) connected(conn net.Conn) {
+	if t != nil {
+		t.Remote = conn.RemoteAddr().String()
+	}
 }
 
 func (t *Trace) fail(s Stage, err error) error {
@@ -101,14 +120,19 @@ func (t *Trace) hostKey(cb ssh.HostKeyCallback) (_ ssh.HostKeyCallback, checked 
 }
 
 // handshakeFailed sorts a failed SSH handshake into the stage it failed at.
+// After the host key, it is the login only if a login method was tried:
+// otherwise the server dropped the connection first (a block list, too many
+// connections). x/crypto/ssh tells that no method worked only by its message.
 func (t *Trace) handshakeFailed(checked func() (bool, error), err error) error {
 	switch called, cbErr := checked(); {
 	case !called:
 		return t.fail(StageHandshake, err)
 	case cbErr != nil:
 		return t.fail(StageHostKey, err)
-	default:
+	case t.authTried || strings.Contains(err.Error(), "unable to authenticate"):
 		return t.fail(StageAuth, err)
+	default:
+		return t.fail(StageAuthStart, err)
 	}
 }
 
@@ -134,7 +158,7 @@ func (t *Trace) signer(s ssh.Signer, how string) ssh.Signer {
 // method notes that the login is being tried with how (a password).
 func (t *Trace) method(how string) {
 	if t != nil {
-		t.Auth = how
+		t.Auth, t.authTried = how, true
 	}
 }
 
@@ -145,6 +169,7 @@ type tracedSigner struct {
 }
 
 func (s *tracedSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
+	s.t.authTried = true
 	sig, err := s.AlgorithmSigner.Sign(rand, data)
 	if err == nil {
 		s.t.Auth = s.desc
@@ -153,6 +178,7 @@ func (s *tracedSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error)
 }
 
 func (s *tracedSigner) SignWithAlgorithm(rand io.Reader, data []byte, algorithm string) (*ssh.Signature, error) {
+	s.t.authTried = true
 	sig, err := s.AlgorithmSigner.SignWithAlgorithm(rand, data, algorithm)
 	if err == nil {
 		s.t.Auth = s.desc

@@ -19,15 +19,21 @@ import (
 	"github.com/TatsuyaOGth/camback/internal/transport/sftp"
 )
 
+func newTestHostKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	k, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
 // newDoctorEnv is newEnv with a dial that fills in a successful trace.
 func newDoctorEnv(t *testing.T) *env {
 	t.Helper()
 	e := newEnv(t)
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	hostKey, err := ssh.NewPublicKey(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostKey := newTestHostKey(t)
 	old := dialTraceFunc
 	dialTraceFunc = func(_ context.Context, _ config.Remote, _ sftp.Prompter, tr *sftp.Trace) (transport.Transport, error) {
 		tr.Addrs = []string{"192.0.2.1"}
@@ -60,6 +66,10 @@ func TestDoctorReadOnly(t *testing.T) {
 	e := newDoctorEnv(t)
 	e.nas.Put("/photo/GR3x/DCIM/100RICOH/R0001.DNG", []byte("raw"), time.Now())
 	e.nas.Put("/photo/GR3x/DCIM/100RICOH/R0002.DNG", []byte("bigger raw"), time.Now())
+	// Smaller, but made by the NAS (Synology thumbnails), not by a run.
+	e.nas.Put("/photo/GR3x/@eaDir/x", []byte("t"), time.Now())
+	e.nas.Put("/photo/GR3x/DCIM/100RICOH/@eaDir/R0001.DNG/SYNOFILE_THUMB_S.jpg", []byte("t"), time.Now())
+	e.nas.Put("/photo/GR3x/#recycle/y", []byte("t"), time.Now())
 
 	code, out := e.doctor()
 	if code != ExitOK {
@@ -74,13 +84,13 @@ func TestDoctorReadOnly(t *testing.T) {
 		"OK    login: ssh-agent key",
 		"OK    SFTP",
 		"Camera \"GR3x\" (nas:/photo/GR3x)\n  OK    dest: exists",
-		// The smallest file is downloaded.
+		// The smallest file a run could have written is downloaded.
 		"OK    sha256sum on the NAS: matches a download of /photo/GR3x/DCIM/100RICOH/R0001.DNG",
 		"SKIP  write access: not checked; use --write-test",
 		"Camera \"XE4\" (nas:/photo/X-E4)\n  WARN  dest: does not exist yet",
 		"No problems, 1 warning.",
 	)
-	if n := len(e.nas.Paths()); n != 2 {
+	if n := len(e.nas.Paths()); n != 5 {
 		t.Errorf("doctor without --write-test wrote to the NAS: %v", e.nas.Paths())
 	}
 }
@@ -106,12 +116,12 @@ func TestDoctorWriteTest(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 	wantLines(t, out,
-		"OK    write access: wrote and removed a probe file in /photo/GR3x",
+		"OK    write access: can write in /photo/GR3x",
 		"OK    sha256sum on the NAS: matches the probe file",
 		"OK    file_mode: 0o644 is applied",
 		"OK    dir_mode: 0o755 is applied",
 		// X-E4 does not exist: the probe goes into /photo.
-		"OK    write access: wrote and removed a probe file in /photo\n",
+		"OK    write access: can write in /photo\n",
 	)
 	if p := e.nas.Paths(); len(p) != 0 {
 		t.Errorf("probe files left behind: %v", p)
@@ -182,6 +192,15 @@ func TestDoctorConfigProblems(t *testing.T) {
 	}
 	wantLines(t, out, "FAIL  config file: "+missing+" (--config) does not exist", "OK    exiftool: ", "Memory cards")
 
+	// A folder, not a file: it cannot be read at all.
+	e.cfg = t.TempDir()
+	_, out = e.doctor()
+	wantLines(t, out, "FAIL  config file: cannot read "+e.cfg+" (--config): ", "fix: check that it is a file you may read")
+	if strings.Contains(out, "is not valid") {
+		t.Errorf("a read error is not a validation error:\n%s", out)
+	}
+
+	e.cfg = missing
 	os.WriteFile(missing, []byte("[defaults]\njobs = 0\n[[camera]]\nid = \"a\"\n"), 0o644)
 	_, out = e.doctor()
 	wantLines(t, out, "is not valid:", "defaults.jobs: must be between 1 and 8", `camera "a": remote "" is not defined`)
@@ -202,5 +221,43 @@ func TestDoctorFailsBeforeConnecting(t *testing.T) {
 	wantLines(t, out, "OK    name lookup: 192.0.2.1", "FAIL  login: identity_file: open /nowhere")
 	if strings.Contains(out, "TCP connection") || strings.Contains(out, "host key") {
 		t.Errorf("stages that did not run are shown:\n%s", out)
+	}
+}
+
+func TestDoctorDroppedBeforeLogin(t *testing.T) {
+	e := newDoctorEnv(t)
+	dialTraceFunc = func(_ context.Context, _ config.Remote, _ sftp.Prompter, tr *sftp.Trace) (transport.Transport, error) {
+		tr.Addrs = []string{"192.0.2.1"}
+		tr.Remote = "192.0.2.1:22"
+		tr.HostKey = newTestHostKey(t)
+		tr.Failed = sftp.StageAuthStart
+		return nil, errors.New("ssh me@nas.test:22: ssh: handshake failed: EOF")
+	}
+	_, out := e.doctor()
+	wantLines(t, out, "OK    host key: ", "FAIL  login: the NAS closed the connection before any login was tried", "may be blocking this computer")
+	if strings.Contains(out, "check user") {
+		t.Errorf("no login was tried, so its fix does not apply:\n%s", out)
+	}
+}
+
+func TestDoctorInterrupted(t *testing.T) {
+	e := newDoctorEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dialTraceFunc = func(ctx context.Context, _ config.Remote, _ sftp.Prompter, tr *sftp.Trace) (transport.Transport, error) {
+		cancel() // Ctrl-C while connecting
+		tr.Addrs = []string{"192.0.2.1"}
+		tr.Failed = sftp.StageConnect
+		return nil, ctx.Err()
+	}
+	var out bytes.Buffer
+	code := executeWith(ctx, []string{"--config", e.cfg, "doctor"}, e.stdin, &out, &out)
+	if code != ExitCanceled {
+		t.Errorf("exit %d, want %d", code, ExitCanceled)
+	}
+	for _, s := range []string{"FAIL", "WARN", "SKIP", "No problems"} {
+		if strings.Contains(out.String(), s) {
+			t.Errorf("reported %s after Ctrl-C:\n%s", s, out.String())
+		}
 	}
 }

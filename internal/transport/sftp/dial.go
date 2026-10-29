@@ -74,9 +74,7 @@ func dial(ctx context.Context, r config.Remote, p Prompter, tr *Trace) (*Client,
 }
 
 func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st *authState, tr *Trace) (*Client, error) {
-	if tr != nil {
-		tr.Failed, tr.Auth = 0, "" // from an attempt that skipped a key
-	}
+	tr.start()
 	if err := tr.resolve(ctx, r.Host); err != nil {
 		return nil, err
 	}
@@ -103,9 +101,7 @@ func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st 
 	if err != nil {
 		return nil, tr.fail(StageConnect, fmt.Errorf("connect %s: %w", addr, err))
 	}
-	if tr != nil {
-		tr.Remote = conn.RemoteAddr().String()
-	}
+	tr.connected(conn)
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
