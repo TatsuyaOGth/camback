@@ -223,13 +223,15 @@ func (r *runner) mkdirAll(d transport.Path) error {
 	return nil
 }
 
-// setMode changes p's permissions and checks that the destination applied
+func (r *runner) setMode(p transport.Path, mode fs.FileMode) error { return SetMode(r.t, p, mode) }
+
+// SetMode changes p's permissions and checks that the destination applied
 // them: some servers accept chmod and change nothing.
-func (r *runner) setMode(p transport.Path, mode fs.FileMode) error {
-	if err := r.t.Chmod(p, mode); err != nil {
+func SetMode(t transport.Transport, p transport.Path, mode fs.FileMode) error {
+	if err := t.Chmod(p, mode); err != nil {
 		return fmt.Errorf("chmod %s: %w", p, err)
 	}
-	fi, err := r.t.Stat(p)
+	fi, err := t.Stat(p)
 	if err != nil {
 		return fmt.Errorf("chmod %s: %w", p, err)
 	}
@@ -284,15 +286,14 @@ func (r *runner) chooseRemoteHash(ctx context.Context, dir transport.Path) (func
 		return readBack, "read-back"
 	}
 	sum := sha256.Sum256(buf)
-	got, err := r.t.SHA256(probe)
-	switch {
-	case err == nil && got == hex.EncodeToString(sum[:]):
+	switch err := hashing.CheckRemote(r.t, probe, hex.EncodeToString(sum[:])); {
+	case err == nil:
 		return func(_ context.Context, p transport.Path) (string, error) { return r.t.SHA256(p) }, "sha256sum on destination"
 	case errors.Is(err, transport.ErrUnsupported):
-	case err != nil:
-		r.opt.Warn(fmt.Sprintf("sha256sum on the destination failed (%v); check shell_path_map. Verifying by read-back (slower)", err))
-	default:
+	case errors.Is(err, hashing.ErrRemoteMismatch):
 		r.opt.Warn("sha256sum on the destination returned a different hash for the probe file; check shell_path_map. Verifying by read-back (slower)")
+	default:
+		r.opt.Warn(fmt.Sprintf("sha256sum on the destination failed (%v); check shell_path_map. Verifying by read-back (slower)", err))
 	}
 	return readBack, "read-back"
 }

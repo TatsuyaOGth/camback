@@ -116,15 +116,32 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".config", "camback", "config.toml"), nil
 }
 
+// Where ResolvePathFrom found the config path.
+const (
+	FromFlag    = "--config"
+	FromEnv     = "$" + EnvConfig
+	FromDefault = "default location"
+)
+
 // ResolvePath picks the config path: flag > CAMBACK_CONFIG > default.
 func ResolvePath(flagValue string) (string, error) {
+	p, _, err := ResolvePathFrom(flagValue)
+	return p, err
+}
+
+// ResolvePathFrom is ResolvePath that also says where the path came from
+// (FromFlag, FromEnv or FromDefault).
+func ResolvePathFrom(flagValue string) (string, string, error) {
 	if flagValue != "" {
-		return ExpandHome(flagValue)
+		p, err := ExpandHome(flagValue)
+		return p, FromFlag, err
 	}
 	if env := os.Getenv(EnvConfig); env != "" {
-		return ExpandHome(env)
+		p, err := ExpandHome(env)
+		return p, FromEnv, err
 	}
-	return DefaultPath()
+	p, err := DefaultPath()
+	return p, FromDefault, err
 }
 
 // ExpandHome replaces a leading "~" with the current user's home directory.

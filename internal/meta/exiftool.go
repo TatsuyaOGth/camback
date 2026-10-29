@@ -31,6 +31,19 @@ func Check() error {
 	return nil
 }
 
+// Version returns exiftool's version (e.g. "13.55") and where it was found.
+func Version(ctx context.Context) (version, path string, err error) {
+	path, err = exec.LookPath("exiftool")
+	if err != nil {
+		return "", "", ErrNotFound
+	}
+	out, err := exec.CommandContext(ctx, path, "-ver").Output()
+	if err != nil {
+		return "", path, fmt.Errorf("exiftool -ver: %w", err)
+	}
+	return strings.TrimSpace(string(out)), path, nil
+}
+
 // flexString accepts both JSON strings and numbers, because exiftool prints
 // numeric-looking values (e.g. a model named "5") as numbers.
 type flexString string

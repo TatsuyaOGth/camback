@@ -93,7 +93,7 @@ Running "camback" without a subcommand is the same as "camback run".`,
 	}
 	ro.register(run)
 
-	root.AddCommand(run, a.inspectCmd())
+	root.AddCommand(run, a.inspectCmd(), a.doctorCmd())
 	return root
 }
 

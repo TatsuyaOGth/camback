@@ -52,11 +52,15 @@ const dialTimeout = 15 * time.Second
 // is shown to the user and added on confirmation, a changed key aborts.
 // Lines of known_hosts that cannot be parsed are skipped with a warning.
 func Dial(ctx context.Context, r config.Remote, p Prompter) (*Client, error) {
+	return dial(ctx, r, p, nil)
+}
+
+func dial(ctx context.Context, r config.Remote, p Prompter, tr *Trace) (*Client, error) {
 	addr := net.JoinHostPort(r.Host, strconv.Itoa(r.Port))
 	p = &onceWarner{Prompter: p, seen: map[string]bool{}}
 	st := &authState{skipped: map[string]bool{}, unlocked: map[string]ssh.Signer{}}
 	for {
-		c, err := dialOnce(ctx, r, p, addr, st)
+		c, err := dialOnce(ctx, r, p, addr, st, tr)
 		// Skipping a key the server accepted aborts the handshake (x/crypto
 		// cannot move on from a key it is about to sign with), so connect
 		// again without that key. Answers already given are reused.
@@ -69,14 +73,19 @@ func Dial(ctx context.Context, r config.Remote, p Prompter) (*Client, error) {
 	}
 }
 
-func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st *authState) (*Client, error) {
-	hostKeyCB, algos, err := hostKeyCallback(addr, p)
-	if err != nil {
+func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st *authState, tr *Trace) (*Client, error) {
+	tr.start()
+	if err := tr.resolve(ctx, r.Host); err != nil {
 		return nil, err
 	}
-	auth, closeAgent, err := authMethods(r, p, st)
+	hostKeyCB, algos, err := hostKeyCallback(addr, tr.prompter(p))
 	if err != nil {
-		return nil, err
+		return nil, tr.fail(StageHostKey, err)
+	}
+	hostKeyCB, hostKeyChecked := tr.hostKey(hostKeyCB)
+	auth, closeAgent, err := authMethods(r, p, st, tr)
+	if err != nil {
+		return nil, tr.fail(StageAuth, err)
 	}
 	defer closeAgent()
 
@@ -90,19 +99,20 @@ func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st 
 	d := net.Dialer{Timeout: dialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("connect %s: %w", addr, err)
+		return nil, tr.fail(StageConnect, fmt.Errorf("connect %s: %w", addr, err))
 	}
+	tr.connected(conn)
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("ssh %s@%s: %w", r.User, addr, err)
+		return nil, tr.handshakeFailed(hostKeyChecked, fmt.Errorf("ssh %s@%s: %w", r.User, addr, err))
 	}
 	sshClient := ssh.NewClient(c, chans, reqs)
 
 	fs, err := psftp.NewClient(sshClient, psftp.UseConcurrentWrites(true))
 	if err != nil {
 		sshClient.Close()
-		return nil, fmt.Errorf("sftp %s: %w (is the SFTP service enabled on this port?)", addr, err)
+		return nil, tr.fail(StageSFTP, fmt.Errorf("sftp %s: %w (is the SFTP service enabled on this port?)", addr, err))
 	}
 	exec := func(cmd string) ([]byte, error) {
 		s, err := sshClient.NewSession()
@@ -119,7 +129,7 @@ func dialOnce(ctx context.Context, r config.Remote, p Prompter, addr string, st 
 
 // authMethods builds the auth list. x/crypto/ssh tries each method type
 // only once, so all keys (agent + files) go into a single PublicKeys method.
-func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, func(), error) {
+func authMethods(r config.Remote, p Prompter, st *authState, tr *Trace) ([]ssh.AuthMethod, func(), error) {
 	closeAgent := func() {}
 	var signers []ssh.Signer
 	inAgent := map[string]bool{}
@@ -127,8 +137,8 @@ func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, 
 	if conn, err := dialAgent(); err == nil {
 		closeAgent = func() { conn.Close() }
 		if s, err := agent.NewClient(conn).Signers(); err == nil {
-			signers = append(signers, s...)
 			for _, k := range s {
+				signers = append(signers, tr.signer(k, "ssh-agent key"))
 				inAgent[string(k.PublicKey().Marshal())] = true
 			}
 		}
@@ -154,7 +164,7 @@ func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, 
 		switch {
 		case err == nil:
 			if !inAgent[string(s.PublicKey().Marshal())] {
-				signers = append(signers, s)
+				signers = append(signers, tr.signer(s, "key file "+f))
 			}
 		case errors.As(err, &missing):
 			pub := missing.PublicKey
@@ -163,7 +173,7 @@ func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, 
 			}
 			if pub != nil {
 				if !inAgent[string(pub.Marshal())] { // otherwise the agent already holds it
-					signers = append(signers, &lazySigner{pub: pub, path: f, data: data, p: p, st: st})
+					signers = append(signers, tr.signer(&lazySigner{pub: pub, path: f, data: data, p: p, st: st}, "key file "+f))
 				}
 				continue
 			}
@@ -174,7 +184,7 @@ func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, 
 				return nil, closeAgent, err
 			}
 			if s != nil {
-				signers = append(signers, s)
+				signers = append(signers, tr.signer(s, "key file "+f))
 			}
 		default:
 			if r.IdentityFile != "" {
@@ -198,8 +208,12 @@ func authMethods(r config.Remote, p Prompter, st *authState) ([]ssh.AuthMethod, 
 		return st.pw, st.pwErr
 	}
 	methods = append(methods,
-		ssh.PasswordCallback(getPw),
+		ssh.PasswordCallback(func() (string, error) {
+			tr.method("password")
+			return getPw()
+		}),
 		ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+			tr.method("password (keyboard-interactive)")
 			answers := make([]string, len(questions))
 			for i := range questions {
 				a, err := getPw()
