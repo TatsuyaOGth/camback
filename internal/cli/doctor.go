@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/TatsuyaOGth/camback/internal/camera"
 	"github.com/TatsuyaOGth/camback/internal/config"
 	"github.com/TatsuyaOGth/camback/internal/execute"
 	"github.com/TatsuyaOGth/camback/internal/hashing"
@@ -510,10 +511,8 @@ func (d *doctor) cards(cfg *config.Config) {
 		detail := fmt.Sprintf("%s (volume %q)", c.Root, c.Label)
 		if cfg != nil {
 			var ids []string
-			for _, cam := range cfg.Cameras {
-				if cam.VolumeLabel != "" && strings.EqualFold(cam.VolumeLabel, c.Label) {
-					ids = append(ids, cam.ID)
-				}
+			for _, cam := range camera.MatchLabel(cfg, c.Label) {
+				ids = append(ids, cam.ID)
 			}
 			if len(ids) > 0 {
 				detail += "; volume_label of " + strings.Join(ids, ", ")

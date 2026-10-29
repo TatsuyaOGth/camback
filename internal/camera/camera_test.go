@@ -75,3 +75,21 @@ func TestMixedErrorType(t *testing.T) {
 		t.Errorf("counts = %v", mixed.Counts)
 	}
 }
+
+func TestMatchLabel(t *testing.T) {
+	cfg := testConfig()
+	ids := func(cams []*config.Camera) string {
+		var s []string
+		for _, c := range cams {
+			s = append(s, c.ID)
+		}
+		return strings.Join(s, ",")
+	}
+	if got := ids(MatchLabel(cfg, "INSTA360GO3")); got != "Go3" {
+		t.Errorf("case-insensitive match: got %q", got)
+	}
+	// A camera without volume_label never matches, not even an empty label.
+	if got := ids(MatchLabel(cfg, "")); got != "" {
+		t.Errorf("empty label: got %q", got)
+	}
+}

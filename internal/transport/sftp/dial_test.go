@@ -53,6 +53,12 @@ func (s *scriptedPrompter) asked(substr string) int {
 // password auth.
 func startServer(t *testing.T, acceptKey ssh.PublicKey, password string) int {
 	t.Helper()
+	return startServerWith(t, acceptKey, password, nil)
+}
+
+// startServerWith is startServer with a chance to change the server config.
+func startServerWith(t *testing.T, acceptKey ssh.PublicKey, password string, tweak func(*ssh.ServerConfig)) int {
+	t.Helper()
 	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
 	hostSigner, err := ssh.NewSignerFromKey(hostPriv)
 	if err != nil {
@@ -73,6 +79,9 @@ func startServer(t *testing.T, acceptKey ssh.PublicKey, password string) int {
 		},
 	}
 	cfg.AddHostKey(hostSigner)
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

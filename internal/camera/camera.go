@@ -42,6 +42,18 @@ func MatchInfo(cfg *config.Config, info meta.Info) *config.Camera {
 	return nil
 }
 
+// MatchLabel returns the profiles whose volume_label is label, ignoring
+// case (labels are often upper-cased by the OS).
+func MatchLabel(cfg *config.Config, label string) []*config.Camera {
+	var out []*config.Camera
+	for i := range cfg.Cameras {
+		if l := cfg.Cameras[i].VolumeLabel; l != "" && strings.EqualFold(l, label) {
+			out = append(out, &cfg.Cameras[i])
+		}
+	}
+	return out
+}
+
 // MixedError means EXIF matched more than one profile.
 type MixedError struct {
 	Counts   map[string]int    // camera id -> files
@@ -144,12 +156,7 @@ func Resolve(cfg *config.Config, infos map[string]meta.Info, volumeLabel, flagID
 		}
 		return &Result{Camera: cam, Method: ByFlag}, nil
 	}
-	var byLabel []*config.Camera
-	for i := range cfg.Cameras {
-		if l := cfg.Cameras[i].VolumeLabel; l != "" && strings.EqualFold(l, volumeLabel) {
-			byLabel = append(byLabel, &cfg.Cameras[i])
-		}
-	}
+	byLabel := MatchLabel(cfg, volumeLabel)
 	switch len(byLabel) {
 	case 1:
 		return &Result{Camera: byLabel[0], Method: ByVolumeLabel}, nil
