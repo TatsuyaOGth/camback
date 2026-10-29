@@ -117,7 +117,12 @@ func (e *env) readNAS(rel string) string {
 }
 
 func (e *env) command(args ...string) *exec.Cmd {
-	cmd := exec.Command(bin, append([]string{"--config", e.cfg, "--source", e.card}, args...)...)
+	return e.commandNoSource(append([]string{"--source", e.card}, args...)...)
+}
+
+// commandNoSource is command for subcommands that take no --source.
+func (e *env) commandNoSource(args ...string) *exec.Cmd {
+	cmd := exec.Command(bin, append([]string{"--config", e.cfg}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"HOME="+e.home,
 		"XDG_CONFIG_HOME="+filepath.Join(e.home, ".config"),
@@ -131,7 +136,11 @@ func (e *env) command(args ...string) *exec.Cmd {
 // run runs camback and returns its exit code and combined output.
 func (e *env) run(args ...string) (int, string) {
 	e.t.Helper()
-	cmd := e.command(args...)
+	return e.runCmd(e.command(args...), args)
+}
+
+func (e *env) runCmd(cmd *exec.Cmd, args []string) (int, string) {
+	e.t.Helper()
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if err != nil && !errors.As(err, &ee) {

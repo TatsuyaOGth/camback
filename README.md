@@ -44,6 +44,24 @@ NAS 上のファイルとフォルダのパーミッションは、`[remote.<名
 
 > **注意（Synology など ACL を使う NAS）：** Windows ACL が有効な共有フォルダでは、パーミッションの変更でファイルの ACL が変わることがあります。使う前に、1 枚だけ転送して File Station などでアクセス権が期待どおりか確認してください。
 
+### 環境を点検する
+
+設定を書いたとき、PC を変えたときは、`camback doctor` でまとめて点検できます。項目ごとに `OK` / `WARN`（警告）/ `FAIL`（問題）と、`fix:` に対処方法を表示します。
+
+```sh
+camback doctor               # NAS には何も書き込まない
+camback doctor --write-test  # 各カメラの dest にプローブファイルを書いて消す
+```
+
+- exiftool が見つかるか、そのバージョン
+- 設定ファイルの場所（`--config` / `CAMBACK_CONFIG` / 既定の場所のどれか）と、検証の結果
+- remote ごとの接続：名前解決、TCP 接続、ホスト鍵、使われた認証方法（ssh-agent・鍵ファイル・パスワード）、SFTP
+- カメラごとの `dest`：あるかどうかと、NAS 上の `sha256sum` が SFTP と同じファイルを読んでいるか（`shell_path_map` が正しいか）。`--write-test` を付けない場合は、`dest` にあるファイルを1つダウンロードして照合します
+- `--write-test` を付けた場合だけ：`dest` に書き込めるか、`file_mode` / `dir_mode` が反映されるか（`dest` がまだなければ、その上にある既存のフォルダで確かめます）
+- 挿さっているメモリーカード
+
+`run` と同じく、初めて接続する NAS ではホスト鍵を表示し、確認してから `~/.ssh/known_hosts` に追加します。問題（`FAIL`）が1つでもあれば終了コードは `1`、警告だけなら `0` です。
+
 ### 使い方
 
 ```sh
@@ -164,6 +182,34 @@ transferring anything.
 > **Note (Synology and other NASes with ACLs):** on a shared folder with
 > Windows ACLs, changing permissions can change a file's ACL. Transfer a
 > single photo first and check its access rights, e.g. in File Station.
+
+### Check your setup
+
+After writing the config, or on a new PC, `camback doctor` checks
+everything at once. Each item is `OK`, `WARN` or `FAIL`, with what to do
+about it after `fix:`.
+
+```sh
+camback doctor               # writes nothing to the NAS
+camback doctor --write-test  # writes and removes a probe file in each camera's dest
+```
+
+- exiftool, and its version
+- which config file is used (from `--config`, `CAMBACK_CONFIG` or the
+  default location) and whether it is valid
+- the connection to each remote: name lookup, TCP connection, host key, how
+  the login worked (ssh-agent, key file or password), SFTP
+- each camera's `dest`: whether it exists, and whether `sha256sum` on the NAS
+  reads the same file as SFTP (that `shell_path_map` is right). Without
+  `--write-test` this downloads one file already in `dest` to compare.
+- with `--write-test` only: whether camback can write in `dest`, and whether
+  `file_mode` / `dir_mode` are applied (in the nearest existing folder above
+  `dest` if `dest` does not exist yet)
+- the memory cards that are inserted
+
+As with `run`, an unknown NAS shows its host key and is added to
+`~/.ssh/known_hosts` once you trust it. The exit code is `1` if anything
+`FAIL`s, `0` if there are only warnings.
 
 ### Use
 

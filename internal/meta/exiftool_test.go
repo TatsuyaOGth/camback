@@ -60,3 +60,13 @@ func TestFlexString(t *testing.T) {
 		t.Errorf("Model = %q", r.Model)
 	}
 }
+
+func TestVersion(t *testing.T) {
+	if Check() != nil {
+		t.Skip("exiftool not installed")
+	}
+	v, p, err := Version(context.Background())
+	if err != nil || v == "" || p == "" {
+		t.Fatalf("Version() = %q, %q, %v", v, p, err)
+	}
+}

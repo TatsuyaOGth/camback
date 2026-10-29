@@ -71,6 +71,25 @@ func ReadBack(ctx context.Context, t transport.Transport, p transport.Path) (str
 	return Reader(ctx, r)
 }
 
+// ErrRemoteMismatch means sha256sum on the destination hashed something
+// other than the file SFTP sees: usually a wrong shell_path_map.
+var ErrRemoteMismatch = errors.New("sha256sum on the destination returned a different hash")
+
+// CheckRemote reports whether the destination's own sha256sum of p is want,
+// that is, whether sha256sum can be trusted to hash the files SFTP writes.
+// It returns transport.ErrUnsupported when the destination cannot run it,
+// ErrRemoteMismatch when the hash differs, or the error of sha256sum.
+func CheckRemote(t transport.Transport, p transport.Path, want string) error {
+	got, err := t.SHA256(p)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return ErrRemoteMismatch
+	}
+	return nil
+}
+
 // RemoteHasher hashes destination files for the planner, preferring the
 // destination's own sha256sum (no download) when it can be trusted.
 //
@@ -109,21 +128,18 @@ func (h *RemoteHasher) Sum(ctx context.Context, p transport.Path) (string, error
 }
 
 func (h *RemoteHasher) firstSum(ctx context.Context, p transport.Path) (string, error) {
-	sum, err := h.t.SHA256(p)
-	if err != nil {
-		if !errors.Is(err, transport.ErrUnsupported) {
-			h.warn(fmt.Sprintf("sha256sum on the destination failed (%v); comparing files by download (slower). Check shell_path_map", err))
-		}
-		return ReadBack(ctx, h.t, p)
-	}
 	downloaded, err := ReadBack(ctx, h.t, p)
 	if err != nil {
 		return "", err
 	}
-	if downloaded != sum {
+	switch err := CheckRemote(h.t, p, downloaded); {
+	case err == nil:
+		h.trusted = true
+	case errors.Is(err, transport.ErrUnsupported):
+	case errors.Is(err, ErrRemoteMismatch):
 		h.warn("sha256sum on the destination does not match the downloaded file; comparing files by download (slower). Check shell_path_map")
-		return downloaded, nil
+	default:
+		h.warn(fmt.Sprintf("sha256sum on the destination failed (%v); comparing files by download (slower). Check shell_path_map", err))
 	}
-	h.trusted = true
 	return downloaded, nil
 }

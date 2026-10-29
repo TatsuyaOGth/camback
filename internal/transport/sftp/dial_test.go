@@ -217,3 +217,109 @@ func TestDialSkipsUnparsableKnownHostsLine(t *testing.T) {
 		t.Errorf("warnings = %q", p.warnings)
 	}
 }
+
+func traceTest(t *testing.T, r config.Remote, p Prompter) (*Trace, error) {
+	t.Helper()
+	tr := &Trace{}
+	c, err := DialTrace(t.Context(), r, p, tr)
+	if err == nil {
+		c.Close()
+	}
+	return tr, err
+}
+
+func TestTracePassword(t *testing.T) {
+	isolateHome(t)
+	port := startServer(t, nil, "pw")
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, &scriptedPrompter{answers: []string{"pw"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Failed != 0 || tr.Auth != "password" || !tr.HostKeyAdded || tr.HostKey == nil {
+		t.Errorf("trace = %+v", tr)
+	}
+	if len(tr.Addrs) != 1 || tr.Addrs[0] != "127.0.0.1" || !strings.HasPrefix(tr.Remote, "127.0.0.1:") {
+		t.Errorf("addrs = %q, remote = %q", tr.Addrs, tr.Remote)
+	}
+
+	// Connecting again finds the host key that was just added.
+	tr, err = traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, &scriptedPrompter{answers: []string{"pw"}})
+	if err != nil || tr.HostKeyAdded {
+		t.Errorf("second dial: added = %v, err = %v", tr.HostKeyAdded, err)
+	}
+}
+
+func TestTraceKeyFile(t *testing.T) {
+	home := isolateHome(t)
+	keyPath, pub := encryptedKey(t, home, "s3cret")
+	port := startServer(t, pub, "")
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u", IdentityFile: keyPath}, &scriptedPrompter{answers: []string{"s3cret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "key file " + keyPath + " (ssh-ed25519 " + ssh.FingerprintSHA256(pub) + ")"; tr.Auth != want {
+		t.Errorf("auth = %q, want %q", tr.Auth, want)
+	}
+}
+
+func TestTraceSkippedKeyThenPassword(t *testing.T) {
+	home := isolateHome(t)
+	keyPath, pub := encryptedKey(t, home, "s3cret")
+	port := startServer(t, pub, "pw")
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u", IdentityFile: keyPath}, &scriptedPrompter{answers: []string{"", "pw"}})
+	if err != nil || tr.Failed != 0 || tr.Auth != "password" {
+		t.Errorf("trace = %+v, err = %v", tr, err)
+	}
+}
+
+// decliningPrompter does not trust any host key.
+type decliningPrompter struct{ scriptedPrompter }
+
+func (*decliningPrompter) Confirm(string) (bool, error) { return false, nil }
+
+func TestTraceFailedStage(t *testing.T) {
+	isolateHome(t)
+	port := startServer(t, nil, "pw")
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := closed.Addr().(*net.TCPAddr).Port
+	closed.Close()
+
+	tests := []struct {
+		name string
+		r    config.Remote
+		p    Prompter
+		want Stage
+	}{
+		{"resolve", config.Remote{Host: "camback-doctor-test.invalid", Port: port, User: "u"}, &scriptedPrompter{}, StageResolve},
+		{"connect", config.Remote{Host: "127.0.0.1", Port: closedPort, User: "u"}, &scriptedPrompter{}, StageConnect},
+		{"host key", config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, &decliningPrompter{}, StageHostKey},
+		{"auth", config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, &scriptedPrompter{answers: []string{"wrong"}}, StageAuth},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr, err := traceTest(t, tt.r, tt.p)
+			if err == nil || tr.Failed != tt.want {
+				t.Errorf("failed = %d, want %d (err = %v)", tr.Failed, tt.want, err)
+			}
+		})
+	}
+}
+
+// errPromptTest stands in for the CLI's "stdin is not a terminal".
+var errPromptTest = errors.New("no terminal")
+
+type failingConfirm struct{ scriptedPrompter }
+
+func (*failingConfirm) Confirm(string) (bool, error) { return false, errPromptTest }
+
+func TestTraceHostKeyPromptErrorIsKept(t *testing.T) {
+	isolateHome(t)
+	port := startServer(t, nil, "pw")
+	tr, err := traceTest(t, config.Remote{Host: "127.0.0.1", Port: port, User: "u"}, &failingConfirm{})
+	if !errors.Is(err, errPromptTest) || tr.Failed != StageHostKey {
+		t.Errorf("err = %v, failed = %d; doctor needs the prompt's error to suggest a terminal", err, tr.Failed)
+	}
+}

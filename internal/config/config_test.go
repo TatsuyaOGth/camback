@@ -138,6 +138,16 @@ func TestResolvePath(t *testing.T) {
 	if got, _ := ResolvePath(""); got != "/from/env.toml" {
 		t.Errorf("env should be used, got %q", got)
 	}
+	if _, from, _ := ResolvePathFrom("/from/flag.toml"); from != FromFlag {
+		t.Errorf("from = %q, want %q", from, FromFlag)
+	}
+	if _, from, _ := ResolvePathFrom(""); from != FromEnv {
+		t.Errorf("from = %q, want %q", from, FromEnv)
+	}
+	t.Setenv(EnvConfig, "")
+	if _, from, _ := ResolvePathFrom(""); from != FromDefault {
+		t.Errorf("from = %q, want %q", from, FromDefault)
+	}
 }
 
 func TestExpandHome(t *testing.T) {
