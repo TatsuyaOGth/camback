@@ -41,6 +41,12 @@ func TestParseValid(t *testing.T) {
 	if cfg.Defaults.OnConflict != OnConflictAbort {
 		t.Errorf("on_conflict default = %q", cfg.Defaults.OnConflict)
 	}
+	if cfg.Defaults.ExifCheck != ExifCheckAll {
+		t.Errorf("exif_check default = %q", cfg.Defaults.ExifCheck)
+	}
+	if !cfg.Defaults.ExifCacheEnabled() {
+		t.Error("exif_cache should be on when not set")
+	}
 	if got := cfg.Cameras[0].Dest; got != "/photo/GR3x" {
 		t.Errorf("dest not cleaned: %q", got)
 	}
@@ -49,6 +55,26 @@ func TestParseValid(t *testing.T) {
 	}
 	if _, ok := cfg.Camera("Go3"); !ok {
 		t.Error("Camera(Go3) not found")
+	}
+}
+
+func TestExifSettings(t *testing.T) {
+	for _, tc := range []struct {
+		defaults string
+		check    string
+		cacheOn  bool
+	}{
+		{"exif_cache = false", ExifCheckAll, false},
+		{"exif_cache = true", ExifCheckAll, true},
+		{"exif_check = \"sample\"", ExifCheckSample, true},
+	} {
+		cfg, err := Parse([]byte("[defaults]\n" + tc.defaults + "\n" + valid))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.defaults, err)
+		}
+		if cfg.Defaults.ExifCheck != tc.check || cfg.Defaults.ExifCacheEnabled() != tc.cacheOn {
+			t.Errorf("%s: exif_check = %q, cache on = %v", tc.defaults, cfg.Defaults.ExifCheck, cfg.Defaults.ExifCacheEnabled())
+		}
 	}
 }
 
@@ -77,6 +103,8 @@ func TestParseErrors(t *testing.T) {
 		{"negative jobs", `[remote.nas]`, "[defaults]\njobs = -1\n[remote.nas]", "defaults.jobs"},
 		{"zero jobs", `[remote.nas]`, "[defaults]\njobs = 0\n[remote.nas]", "defaults.jobs: must be between 1 and 8, got 0"},
 		{"bad on_conflict", `[remote.nas]`, "[defaults]\non_conflict = \"overwrite\"\n[remote.nas]", `defaults.on_conflict: must be "abort", "skip" or "rename", got "overwrite"`},
+		{"bad exif_check", `[remote.nas]`, "[defaults]\nexif_check = \"some\"\n[remote.nas]", `defaults.exif_check: must be "all" or "sample", got "some"`},
+		{"string exif_cache", `[remote.nas]`, "[defaults]\nexif_cache = \"no\"\n[remote.nas]", "ExifCache"},
 		{"relative dest", `dest = "/photo/GR3x/"`, `dest = "photo/GR3x"`, "absolute SFTP path"},
 		{"undefined remote", `remote = "nas"`, `remote = "nas2"`, `remote "nas2" is not defined`},
 		{"duplicate id", `id = "Go3"`, `id = "GR3x"`, "duplicate id"},

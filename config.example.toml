@@ -45,6 +45,16 @@ on_conflict = "abort"
 # element, with "/" the whole card-relative path. Dotfiles and OS
 # housekeeping folders are always excluded.
 # exclude = ["*.THM"]
+# Media files whose EXIF is read to find the camera: "all" (every file, so a
+# card with another camera's photos is always caught) or "sample" (the first
+# and last file of each extension in each folder: faster on a full card, but
+# another camera's photos in the middle of a folder go unnoticed).
+# --exif-check overrides.
+exif_check = "all"
+# Cache the EXIF read from each card on this PC, so that later runs read only
+# new files. false: never read or write the cache (--no-exif-cache does the
+# same for one run).
+exif_cache = true
 
 # One entry per camera. Run `camback inspect <card>` to see the exact EXIF
 # Make/Model strings to put in "match".
