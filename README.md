@@ -9,7 +9,7 @@ camback は、カメラのメモリーカードの中身を SFTP で NAS に直�
 
 - **新しいファイルだけをコピーします。** NAS にすでにある写真は飛ばすので、転送済みの写真をカードに残したままでもかまいません。
 - **既存のファイルは決して上書きしません。** 同じ名前で中身の*違う*写真・動画が NAS にある場合は、何もコピーせずに中断します（`--on-conflict` で、そのファイルだけ飛ばすことも、隣に別の名前で保存することもできます）。カメラの管理ファイル（データベースや XML）のように内容が変わっていくファイルは、古いものを残したまま、更新日時（UTC）付きの名前で隣に保存します（例：`MEDIAPRO_20261016-002627Z.XML`）。
-- **カメラを EXIF から自動で判定します。** カード上のすべての写真が、設定ファイルに登録した同じ1台のものでなければ中断するので、別の機材の写真が混ざりません。
+- **カメラを EXIF から自動で判定します。** カード上のすべての写真が、設定ファイルに登録した同じ1台のものでなければ中断するので、別の機材の写真が混ざりません（`exif_check = "sample"` にした場合は一部の写真だけを確かめます。[カメラの判定](#カメラの判定)を参照）。
 - **先に計画を示してからコピーします。** 何をするかを表示し、確認してから転送します。`--dry-run` を付けると計画の表示だけで終わります。
 - **すべてのファイルを検証します**（SHA-256）。検証が済んでから最終的な名前に変えます。
 
@@ -87,6 +87,18 @@ camback --on-conflict rename   # 衝突したファイルを隣に別の名前�
 
 Ctrl-C を1回押すと、処理の切れ目で安全に止まります（転送中の一時ファイルは削除します）。もう1回押すと即座に終了します。
 
+### カメラの判定
+
+カメラは、カード上の写真・動画の EXIF（Make / Model）から判定します。読んだ結果は PC にキャッシュするので、2回目からはカードに新しく増えたファイルの EXIF だけを読みます。
+
+- キャッシュの保存先：`~/Library/Caches/camback`（macOS）、`%LocalAppData%\camback`（Windows）、`~/.cache/camback`（Linux）。カード（ボリューム名）ごとに1ファイルで、いつ消してもかまいません（次の実行で作り直します）。
+- キャッシュするのは Make / Model を読めたファイルだけです。サイズか更新日時が変わったファイルは読み直します。
+- キャッシュを使わない（読みも書きもしない）場合は、`--no-exif-cache` を付けるか、設定ファイルの `[defaults]` に `exif_cache = false` と書きます。
+
+カードを挿した直後は、ファイルが多いと EXIF の読み込みに時間がかかります（1000 ファイル以上で十数秒）。`--exif-check sample` か設定ファイルの `[defaults] exif_check = "sample"` にすると、フォルダごとに拡張子別の先頭と末尾のファイルだけを確かめます（キャッシュにあるファイルはすべて使います）。
+
+> **注意：** `sample` では、フォルダの途中に別のカメラの写真が混ざっていても気づかずに転送します。1枚のカードを複数のカメラで使い回さない場合にだけ使ってください。既定は `all`（すべてのファイルを確かめる）です。
+
 ログ（JSON Lines 形式、実行1回につき1ファイル）の保存先：`~/Library/Logs/camback`（macOS）、`%LocalAppData%\camback\logs`（Windows）、`~/.local/state/camback`（Linux）。
 
 ### SSH のパスワード入力をなくす
@@ -133,7 +145,9 @@ SFTP. It works the same on macOS, Windows and Linux.
   the old copy with their modification time in UTC, e.g.
   `MEDIAPRO_20261016-002627Z.XML`.
 - **The camera is detected from EXIF.** Every photo on the card must belong to
-  the same configured camera, so shots from different bodies never get mixed.
+  the same configured camera, so shots from different bodies never get mixed
+  (with `exif_check = "sample"`, only some photos are checked; see
+  [Camera detection](#camera-detection)).
 - **Plan first, then copy.** camback shows what it will do and asks before
   transferring. `--dry-run` stops after the plan.
 - **Every file is verified** (SHA-256) before it gets its final name.
@@ -249,6 +263,31 @@ transferred until then when one appeared on the NAS during the transfer),
 
 Press Ctrl-C once to stop safely at the next step (a partially written file is
 removed); press it again to quit immediately.
+
+### Camera detection
+
+The camera is found from the EXIF Make/Model of the photos and videos on the
+card. What camback reads is cached on the PC, so from the second run on it
+reads only the files that are new on the card.
+
+- The cache is in `~/Library/Caches/camback` (macOS),
+  `%LocalAppData%\camback` (Windows) or `~/.cache/camback` (Linux), one file
+  per card (volume label). You can delete it at any time; the next run
+  rebuilds it.
+- Only files whose Make/Model could be read are cached. A file whose size or
+  modification time changed is read again.
+- To run without the cache (nothing read from or written to it), pass
+  `--no-exif-cache` or set `exif_cache = false` under `[defaults]`.
+
+Right after inserting a card with many files, reading their EXIF takes time
+(over ten seconds for more than 1000 files). With `--exif-check sample` or
+`exif_check = "sample"` under `[defaults]`, camback checks only the first and
+the last file of each extension in each folder (and still uses everything in
+the cache).
+
+> **Note:** with `sample`, another camera's photos in the middle of a folder
+> go unnoticed and are transferred. Use it only if you never share a card
+> between cameras. The default is `all` (every file is checked).
 
 Logs (JSON Lines, one file per run) are written to `~/Library/Logs/camback`
 (macOS), `%LocalAppData%\camback\logs` (Windows) or `~/.local/state/camback`

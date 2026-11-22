@@ -33,6 +33,15 @@ const (
 	OnConflictRename = "rename" // save it next to the other one under a timestamped name
 )
 
+// How many of the card's media files have their EXIF read to find the camera.
+const (
+	ExifCheckAll    = "all"    // every file, so a card with another camera's photos is always caught
+	ExifCheckSample = "sample" // the first and last file of each extension in each folder
+)
+
+// ValidExifCheck reports whether s is one of the ExifCheck values.
+func ValidExifCheck(s string) bool { return s == ExifCheckAll || s == ExifCheckSample }
+
 // Parallel transfers.
 const (
 	DefaultJobs = 4
@@ -71,7 +80,14 @@ type Defaults struct {
 	OnConflict      string   `toml:"on_conflict"`
 	MediaExtensions []string `toml:"media_extensions"`
 	Exclude         []string `toml:"exclude"`
+	ExifCheck       string   `toml:"exif_check"`
+	// ExifCache keeps the EXIF read from each card so that later runs read
+	// only new files. A pointer, so that "not set" (on) differs from false.
+	ExifCache *bool `toml:"exif_cache"`
 }
+
+// ExifCacheEnabled reports whether the EXIF cache is on (the default).
+func (d Defaults) ExifCacheEnabled() bool { return d.ExifCache == nil || *d.ExifCache }
 
 // Camera is one camera profile.
 type Camera struct {
@@ -198,6 +214,9 @@ func (c *Config) applyDefaults() {
 	if c.Defaults.OnConflict == "" {
 		c.Defaults.OnConflict = OnConflictAbort
 	}
+	if c.Defaults.ExifCheck == "" {
+		c.Defaults.ExifCheck = ExifCheckAll
+	}
 	for name, r := range c.Remotes {
 		if r.Port == 0 {
 			r.Port = 22
@@ -224,6 +243,9 @@ func (c *Config) Validate() error {
 	}
 	if !ValidOnConflict(c.Defaults.OnConflict) {
 		add("defaults.on_conflict: must be %q, %q or %q, got %q", OnConflictAbort, OnConflictSkip, OnConflictRename, c.Defaults.OnConflict)
+	}
+	if !ValidExifCheck(c.Defaults.ExifCheck) {
+		add("defaults.exif_check: must be %q or %q, got %q", ExifCheckAll, ExifCheckSample, c.Defaults.ExifCheck)
 	}
 	if j := c.Defaults.Jobs; j < 1 || j > MaxJobs {
 		add("defaults.jobs: must be between 1 and %d, got %d", MaxJobs, j)

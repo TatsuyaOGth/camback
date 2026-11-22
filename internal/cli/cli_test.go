@@ -11,6 +11,7 @@ import (
 
 	"github.com/TatsuyaOGth/camback/internal/applog"
 	"github.com/TatsuyaOGth/camback/internal/config"
+	"github.com/TatsuyaOGth/camback/internal/exifscan"
 	"github.com/TatsuyaOGth/camback/internal/meta"
 	"github.com/TatsuyaOGth/camback/internal/plan"
 	"github.com/TatsuyaOGth/camback/internal/testutil"
@@ -55,6 +56,7 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("LocalAppData", home)
 	t.Setenv("XDG_STATE_HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.toml")
@@ -238,6 +240,75 @@ func TestRunMixedCameras(t *testing.T) {
 	code, out := e.run("--yes")
 	if code != ExitFailure || !strings.Contains(out, "more than one camera") {
 		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestRunExifCache(t *testing.T) {
+	e := newEnv(t)
+	cacheDir, err := exifscan.Dir() // inside the test's temporary home
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turned off by the flag or the config: no cache is read or written.
+	if code, out := e.run("--dry-run", "--no-exif-cache"); code != ExitOK || strings.Contains(out, "EXIF cache") {
+		t.Fatalf("--no-exif-cache: code %d\n%s", code, out)
+	}
+	os.WriteFile(e.cfg, []byte(testConfig+"\n[defaults]\nexif_cache = false\n"), 0o644)
+	if code, out := e.run("--dry-run"); code != ExitOK || strings.Contains(out, "EXIF cache") {
+		t.Fatalf("exif_cache = false: code %d\n%s", code, out)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("cache directory created while the cache was off: %v", err)
+	}
+
+	// On by default. Only the JPG has EXIF, so only the JPG is cached.
+	os.WriteFile(e.cfg, []byte(testConfig), 0o644)
+	if code, out := e.run("--dry-run"); code != ExitOK || strings.Contains(out, "EXIF cache") {
+		t.Fatalf("first run: code %d\n%s", code, out)
+	}
+	code, out := e.run("--dry-run")
+	if code != ExitOK || !strings.Contains(out, "Camera : GR3x  (EXIF matched 1 of 2 media files; 1 from the EXIF cache)") {
+		t.Fatalf("second run: code %d\n%s", code, out)
+	}
+	if files, _ := filepath.Glob(filepath.Join(cacheDir, "exif-*.json")); len(files) != 1 {
+		t.Errorf("expected one cache file in %s, got %v", cacheDir, files)
+	}
+
+	// A new file from another camera is still caught.
+	testutil.WriteJPEG(t, filepath.Join(e.card, "DCIM", "100_FUJI", "DSCF0001.JPG"), "FUJIFILM", "X-E4")
+	if code, out := e.run("--dry-run"); code != ExitFailure || !strings.Contains(out, "more than one camera") {
+		t.Fatalf("mixed: code %d\n%s", code, out)
+	}
+}
+
+func TestRunExifCheckSample(t *testing.T) {
+	e := newEnv(t)
+	if code, out := e.run("--dry-run", "--exif-check", "some"); code != ExitFailure || !strings.Contains(out, `--exif-check must be "all" or "sample"`) {
+		t.Fatalf("bad value: code %d\n%s", code, out)
+	}
+
+	// Between the first and the last JPG of the folder, another camera's
+	// photo is not checked: the risk exif_check = "sample" accepts.
+	dir := filepath.Join(e.card, "DCIM", "100RICOH")
+	testutil.WriteJPEG(t, filepath.Join(dir, "R0002.JPG"), "FUJIFILM", "X-E4")
+	testutil.WriteJPEG(t, filepath.Join(dir, "R0003.JPG"), "RICOH IMAGING COMPANY, LTD.", "RICOH GR IIIx")
+	if code, out := e.run("--dry-run", "--no-exif-cache"); code != ExitFailure || !strings.Contains(out, "more than one camera") {
+		t.Fatalf("all: code %d\n%s", code, out)
+	}
+	code, out := e.run("--dry-run", "--no-exif-cache", "--exif-check", "sample")
+	want := "Camera : GR3x  (EXIF matched 2 of 3 checked out of 4 media files; 1 not checked: exif_check = sample)"
+	if code != ExitOK || !strings.Contains(out, want) {
+		t.Fatalf("sample: code %d\n%s", code, out)
+	}
+
+	// The config can turn it on, and the flag back off.
+	os.WriteFile(e.cfg, []byte(testConfig+"\n[defaults]\nexif_check = \"sample\"\nexif_cache = false\n"), 0o644)
+	if code, out := e.run("--dry-run"); code != ExitOK || !strings.Contains(out, "not checked") {
+		t.Fatalf("config: code %d\n%s", code, out)
+	}
+	if code, out := e.run("--dry-run", "--exif-check", "all"); code != ExitFailure || !strings.Contains(out, "more than one camera") {
+		t.Fatalf("flag over config: code %d\n%s", code, out)
 	}
 }
 
